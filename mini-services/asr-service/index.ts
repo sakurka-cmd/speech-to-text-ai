@@ -16,13 +16,14 @@ const io = new Server(httpServer, {
 })
 
 const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || 'http://localhost:5000'
+const WHISPER_TIMEOUT = parseInt(process.env.WHISPER_TIMEOUT || '1800000') // 30 minutes default
 
 interface UploadSession {
   id: string
   fileName: string
   fileSize: number
   totalChunks: number
-  chunks: Map<number, Buffer>  // Store as Buffer, not base64 string!
+  chunks: Map<number, Buffer>
   createdAt: Date
 }
 
@@ -42,7 +43,6 @@ interface TranscriptionJob {
 const uploadSessions = new Map<string, UploadSession>()
 const jobs = new Map<string, TranscriptionJob>()
 
-// Clean up old sessions every 5 minutes
 setInterval(() => {
   const now = Date.now()
   for (const [id, session] of uploadSessions) {
@@ -67,14 +67,14 @@ function simulateProgress(jobId: string, socket: any) {
       currentJob.progress = Math.min(85, currentJob.progress + Math.random() * 2 + 0.5)
       socket.emit('progress', { jobId, progress: currentJob.progress })
     }
-  }, 1000)
+  }, 2000)  // Update every 2 seconds
 
   return interval
 }
 
 async function transcribeWithWhisper(
   jobId: string, 
-  audioBuffer: Buffer,  // Now receiving Buffer directly
+  audioBuffer: Buffer,
   fileName: string, 
   fileSize: number, 
   socket: any
@@ -95,15 +95,31 @@ async function transcribeWithWhisper(
     }
     
     const contentType = contentTypes[ext] || 'audio/wav'
-    console.log(`Sending ${audioBuffer.length} bytes (${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB) to Whisper service...`)
+    const sizeMB = (audioBuffer.length / 1024 / 1024).toFixed(2)
+    console.log(`Sending ${audioBuffer.length} bytes (${sizeMB} MB) to Whisper service...`)
+    console.log(`Timeout set to ${WHISPER_TIMEOUT / 1000 / 60} minutes`)
 
     const formData = new FormData()
     formData.append('file', new Blob([audioBuffer], { type: contentType }), fileName)
 
+    // Use AbortController with long timeout
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      console.log('Request timeout, aborting...')
+      controller.abort()
+    }, WHISPER_TIMEOUT)
+
+    const startTime = Date.now()
+    
     const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
       method: 'POST',
-      body: formData
+      body: formData,
+      signal: controller.signal,
+      // @ts-ignore - Bun specific
+      timeout: WHISPER_TIMEOUT
     })
+
+    clearTimeout(timeoutId)
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
@@ -113,6 +129,9 @@ async function transcribeWithWhisper(
     const result = await response.json()
     
     clearInterval(progressInterval)
+
+    const totalTime = (Date.now() - startTime) / 1000
+    console.log(`Whisper processing time: ${result.processing_time?.toFixed(1)}s, Total time: ${totalTime.toFixed(1)}s`)
 
     job.progress = 100
     job.status = 'completed'
@@ -129,7 +148,7 @@ async function transcribeWithWhisper(
       processingTime: result.processing_time
     })
 
-    console.log(`Job ${jobId} completed: ${result.word_count} words in ${result.processing_time.toFixed(1)}s`)
+    console.log(`Job ${jobId} completed: ${result.word_count} words`)
 
   } catch (error: any) {
     clearInterval(progressInterval)
@@ -138,14 +157,13 @@ async function transcribeWithWhisper(
     job.error = error.message || 'Unknown error'
 
     socket.emit('error', { jobId, error: job.error })
-    console.error(`Job ${jobId} failed:`, error)
+    console.error(`Job ${jobId} failed:`, error.message || error)
   }
 }
 
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`)
 
-  // Start chunked upload
   socket.on('start-upload', (data: { fileName: string; fileSize: number; totalChunks: number }) => {
     const sessionId = randomUUID()
     const session: UploadSession = {
@@ -153,13 +171,13 @@ io.on('connection', (socket) => {
       fileName: data.fileName,
       fileSize: data.fileSize,
       totalChunks: data.totalChunks,
-      chunks: new Map(),  // Store Buffers
+      chunks: new Map(),
       createdAt: new Date()
     }
     uploadSessions.set(sessionId, session)
     
     socket.data.uploadSessionId = sessionId
-    console.log(`Upload session ${sessionId} started: ${data.fileName}, ${data.fileSize} bytes, ${data.totalChunks} chunks`)
+    console.log(`Upload session ${sessionId}: ${data.fileName}, ${(data.fileSize / 1024 / 1024).toFixed(2)} MB, ${data.totalChunks} chunks`)
     
     const jobId = randomUUID()
     const job: TranscriptionJob = {
@@ -175,7 +193,6 @@ io.on('connection', (socket) => {
     socket.emit('upload-started', { sessionId, jobId })
   })
 
-  // Receive chunk
   socket.on('upload-chunk', async (data: { chunkIndex: number; chunkData: string; isLast: boolean }) => {
     const sessionId = socket.data.uploadSessionId
     if (!sessionId) {
@@ -189,7 +206,6 @@ io.on('connection', (socket) => {
       return
     }
 
-    // Decode base64 to Buffer and store
     const chunkBuffer = Buffer.from(data.chunkData, 'base64')
     session.chunks.set(data.chunkIndex, chunkBuffer)
     
@@ -198,13 +214,11 @@ io.on('connection', (socket) => {
       total: session.totalChunks
     })
 
-    // If all chunks received, combine and transcribe
     if (data.isLast && session.chunks.size === session.totalChunks) {
-      console.log(`All ${session.totalChunks} chunks received for session ${sessionId}`)
+      console.log(`All ${session.totalChunks} chunks received`)
       
       socket.emit('upload-complete')
       
-      // Combine chunks in order
       const buffers: Buffer[] = []
       let totalSize = 0
       for (let i = 0; i < session.totalChunks; i++) {
@@ -217,14 +231,11 @@ io.on('connection', (socket) => {
         totalSize += chunk.length
       }
 
-      // Concatenate all buffers
       const combinedBuffer = Buffer.concat(buffers, totalSize)
-      console.log(`Combined buffer size: ${combinedBuffer.length} bytes (${(combinedBuffer.length / 1024 / 1024).toFixed(2)} MB)`)
+      console.log(`Combined: ${(combinedBuffer.length / 1024 / 1024).toFixed(2)} MB`)
 
-      // Clean up session
       uploadSessions.delete(sessionId)
 
-      // Start transcription
       const jobId = socket.data.jobId
       if (jobId) {
         socket.emit('job-created', { jobId })
@@ -242,6 +253,7 @@ const PORT = 3003
 httpServer.listen(PORT, () => {
   console.log(`ASR WebSocket proxy running on port ${PORT}`)
   console.log(`Whisper service URL: ${WHISPER_SERVICE_URL}`)
+  console.log(`Whisper timeout: ${WHISPER_TIMEOUT / 1000 / 60} minutes`)
 })
 
 process.on('SIGTERM', () => {
