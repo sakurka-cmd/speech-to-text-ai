@@ -10,14 +10,21 @@ const io = new Server(httpServer, {
     methods: ["GET", "POST"],
     credentials: false
   },
-  pingTimeout: 300000,
+  pingTimeout: 600000, // 10 minutes
   pingInterval: 25000,
-  maxHttpBufferSize: 100e6,
-  transports: ['websocket', 'polling']
+  maxHttpBufferSize: 150e6 // 150MB
 })
 
-// Whisper service URL
 const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || 'http://localhost:5000'
+
+interface UploadSession {
+  id: string
+  fileName: string
+  fileSize: number
+  totalChunks: number
+  receivedChunks: Map<number, string>
+  createdAt: Date
+}
 
 interface TranscriptionJob {
   id: string
@@ -34,9 +41,19 @@ interface TranscriptionJob {
   endTime?: Date
 }
 
+const uploadSessions = new Map<string, UploadSession>()
 const jobs = new Map<string, TranscriptionJob>()
 
-// Progress simulation for better UX
+// Clean up old upload sessions every 5 minutes
+setInterval(() => {
+  const now = Date.now()
+  for (const [id, session] of uploadSessions) {
+    if (now - session.createdAt.getTime() > 30 * 60 * 1000) { // 30 minutes
+      uploadSessions.delete(id)
+    }
+  }
+}, 5 * 60 * 1000)
+
 function simulateProgress(jobId: string, socket: any) {
   const job = jobs.get(jobId)
   if (!job || job.status !== 'processing') return
@@ -49,21 +66,10 @@ function simulateProgress(jobId: string, socket: any) {
     }
 
     if (currentJob.progress < 85) {
-      const increment = Math.random() * 3 + 1
-      currentJob.progress = Math.min(85, currentJob.progress + increment)
-      
-      let statusText = 'Загрузка аудио...'
-      if (currentJob.progress >= 30) statusText = 'Анализ речи...'
-      if (currentJob.progress >= 60) statusText = 'Распознавание текста...'
-      if (currentJob.progress >= 80) statusText = 'Финальная обработка...'
-      
-      socket.emit('progress', {
-        jobId,
-        progress: currentJob.progress,
-        status: statusText
-      })
+      currentJob.progress = Math.min(85, currentJob.progress + Math.random() * 2 + 0.5)
+      socket.emit('progress', { jobId, progress: currentJob.progress })
     }
-  }, 500)
+  }, 1000)
 
   return interval
 }
@@ -87,25 +93,16 @@ async function transcribeWithWhisper(
     const ext = fileName.split('.').pop()?.toLowerCase() || 'wav'
     
     const contentTypes: Record<string, string> = {
-      'wav': 'audio/wav',
-      'mp3': 'audio/mpeg',
-      'm4a': 'audio/m4a',
-      'flac': 'audio/flac',
-      'ogg': 'audio/ogg',
-      'webm': 'audio/webm',
-      'mp4': 'audio/mp4',
-      'mpeg': 'audio/mpeg',
-      'mpga': 'audio/mpeg',
-      'oga': 'audio/ogg'
+      'wav': 'audio/wav', 'mp3': 'audio/mpeg', 'm4a': 'audio/m4a',
+      'flac': 'audio/flac', 'ogg': 'audio/ogg', 'webm': 'audio/webm',
+      'mp4': 'audio/mp4', 'mpeg': 'audio/mpeg', 'mpga': 'audio/mpeg'
     }
     
     const contentType = contentTypes[ext] || 'audio/wav'
-
     console.log(`Sending ${audioBuffer.length} bytes to Whisper service...`)
 
     const formData = new FormData()
-    const blob = new Blob([audioBuffer], { type: contentType })
-    formData.append('file', blob, fileName)
+    formData.append('file', new Blob([audioBuffer], { type: contentType }), fileName)
 
     const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
       method: 'POST',
@@ -114,7 +111,7 @@ async function transcribeWithWhisper(
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
-      throw new Error(errorData.detail || `Whisper service error: ${response.status}`)
+      throw new Error(errorData.detail || `Whisper error: ${response.status}`)
     }
 
     const result = await response.json()
@@ -137,20 +134,16 @@ async function transcribeWithWhisper(
       processingTime: result.processing_time
     })
 
-    console.log(`Job ${jobId} completed: ${result.word_count} words in ${result.processing_time.toFixed(2)}s`)
+    console.log(`Job ${jobId} completed: ${result.word_count} words in ${result.processing_time.toFixed(1)}s`)
 
   } catch (error: any) {
     clearInterval(progressInterval)
     
     job.status = 'failed'
-    job.error = error.message || 'Unknown error during transcription'
+    job.error = error.message || 'Unknown error'
     job.endTime = new Date()
 
-    socket.emit('error', {
-      jobId,
-      error: job.error
-    })
-
+    socket.emit('error', { jobId, error: job.error })
     console.error(`Job ${jobId} failed:`, error)
   }
 }
@@ -158,18 +151,98 @@ async function transcribeWithWhisper(
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`)
 
+  // Start chunked upload
+  socket.on('start-upload', (data: { fileName: string; fileSize: number; totalChunks: number }) => {
+    const sessionId = randomUUID()
+    const session: UploadSession = {
+      id: sessionId,
+      fileName: data.fileName,
+      fileSize: data.fileSize,
+      totalChunks: data.totalChunks,
+      receivedChunks: new Map(),
+      createdAt: new Date()
+    }
+    uploadSessions.set(sessionId, session)
+    
+    socket.data.uploadSessionId = sessionId
+    console.log(`Upload session ${sessionId} started: ${data.fileName}, ${data.fileSize} bytes, ${data.totalChunks} chunks`)
+    
+    // Create job
+    const jobId = randomUUID()
+    const job: TranscriptionJob = {
+      id: jobId,
+      status: 'pending',
+      progress: 0,
+      fileName: data.fileName,
+      fileSize: data.fileSize
+    }
+    jobs.set(jobId, job)
+    socket.data.jobId = jobId
+    
+    socket.emit('upload-started', { sessionId, jobId })
+  })
+
+  // Receive chunk
+  socket.on('upload-chunk', async (data: { chunkIndex: number; chunkData: string; isLast: boolean }) => {
+    const sessionId = socket.data.uploadSessionId
+    if (!sessionId) {
+      socket.emit('error', { error: 'No upload session' })
+      return
+    }
+
+    const session = uploadSessions.get(sessionId)
+    if (!session) {
+      socket.emit('error', { error: 'Session not found' })
+      return
+    }
+
+    // Store chunk
+    session.receivedChunks.set(data.chunkIndex, data.chunkData)
+    
+    socket.emit('chunk-received', {
+      received: session.receivedChunks.size,
+      total: session.totalChunks
+    })
+
+    // If all chunks received, combine and transcribe
+    if (data.isLast && session.receivedChunks.size === session.totalChunks) {
+      console.log(`All ${session.totalChunks} chunks received for session ${sessionId}`)
+      
+      socket.emit('upload-complete')
+      
+      // Combine chunks
+      let combinedBase64 = ''
+      for (let i = 0; i < session.totalChunks; i++) {
+        const chunk = session.receivedChunks.get(i)
+        if (!chunk) {
+          socket.emit('error', { error: `Missing chunk ${i}` })
+          return
+        }
+        combinedBase64 += chunk
+      }
+
+      // Clean up session
+      uploadSessions.delete(sessionId)
+
+      // Start transcription
+      const jobId = socket.data.jobId
+      if (jobId) {
+        socket.emit('job-created', { jobId })
+        transcribeWithWhisper(jobId, combinedBase64, session.fileName, session.fileSize, socket)
+      }
+    }
+  })
+
+  // Legacy single-message upload (for small files)
   socket.on('start-transcription', async (data: { 
     fileName: string
     fileSize: number
     base64Audio: string 
   }) => {
-    const { fileName, fileSize, base64Audio } = data
-    console.log(`Received transcription request: ${fileName}, ${fileSize} bytes`)
+    console.log(`Received legacy transcription request: ${data.fileName}, ${data.fileSize} bytes`)
 
-    if (fileSize > 100 * 1024 * 1024) {
-      socket.emit('error', {
-        error: 'Файл слишком большой. Максимальный размер: 100MB.'
-      })
+    if (data.fileSize > 100 * 1024 * 1024) {
+      socket.emit('error', { error: 'Файл слишком большой. Максимум: 100MB.' })
       return
     }
 
@@ -178,45 +251,17 @@ io.on('connection', (socket) => {
       id: jobId,
       status: 'pending',
       progress: 0,
-      fileName,
-      fileSize
+      fileName: data.fileName,
+      fileSize: data.fileSize
     }
     jobs.set(jobId, job)
 
-    socket.emit('job-created', {
-      jobId,
-      fileName,
-      fileSize
-    })
-
-    transcribeWithWhisper(jobId, base64Audio, fileName, fileSize, socket)
-  })
-
-  socket.on('get-job-status', (data: { jobId: string }) => {
-    const job = jobs.get(data.jobId)
-    if (job) {
-      socket.emit('job-status', {
-        jobId: job.id,
-        status: job.status,
-        progress: job.progress,
-        transcription: job.transcription,
-        wordCount: job.wordCount,
-        language: job.language,
-        error: job.error
-      })
-    } else {
-      socket.emit('error', {
-        error: 'Задача не найдена'
-      })
-    }
+    socket.emit('job-created', { jobId })
+    transcribeWithWhisper(jobId, data.base64Audio, data.fileName, data.fileSize, socket)
   })
 
   socket.on('disconnect', (reason) => {
     console.log(`Client disconnected: ${socket.id}, reason: ${reason}`)
-  })
-
-  socket.on('error', (error) => {
-    console.error(`Socket error (${socket.id}):`, error)
   })
 })
 
@@ -227,17 +272,6 @@ httpServer.listen(PORT, () => {
 })
 
 process.on('SIGTERM', () => {
-  console.log('Received SIGTERM signal, shutting down server...')
-  httpServer.close(() => {
-    console.log('ASR WebSocket server closed')
-    process.exit(0)
-  })
-})
-
-process.on('SIGINT', () => {
-  console.log('Received SIGINT signal, shutting down server...')
-  httpServer.close(() => {
-    console.log('ASR WebSocket server closed')
-    process.exit(0)
-  })
+  console.log('Shutting down...')
+  httpServer.close(() => process.exit(0))
 })

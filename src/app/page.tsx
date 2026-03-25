@@ -25,6 +25,9 @@ import {
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 
+// Chunk size: 1MB per chunk
+const CHUNK_SIZE = 1024 * 1024
+
 interface TranscriptionResult {
   text: string
   wordCount: number
@@ -39,6 +42,7 @@ type Status = 'idle' | 'connecting' | 'uploading' | 'processing' | 'completed' |
 export default function Home() {
   const [status, setStatus] = useState<Status>('idle')
   const [progress, setProgress] = useState(0)
+  const [uploadProgress, setUploadProgress] = useState(0)
   const [file, setFile] = useState<File | null>(null)
   const [result, setResult] = useState<TranscriptionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -48,28 +52,8 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
 
-  // File to base64 (browser-compatible)
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => {
-        const arrayBuffer = reader.result as ArrayBuffer
-        const bytes = new Uint8Array(arrayBuffer)
-        let binary = ''
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i])
-        }
-        resolve(btoa(binary))
-      }
-      reader.onerror = reject
-      reader.readAsArrayBuffer(file)
-    })
-  }
-
   // Initialize WebSocket connection
   useEffect(() => {
-    // Use relative URL - will work through Nginx proxy
-    // Nginx should proxy /socket.io/ to the asr-proxy service
     const wsUrl = typeof window !== 'undefined' ? window.location.origin : ''
     
     console.log('Connecting to WebSocket:', wsUrl)
@@ -80,13 +64,13 @@ export default function Home() {
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
-      timeout: 10000,
+      timeout: 30000,
+      maxHttpBufferSize: 150 * 1024 * 1024, // 150MB max
     })
 
     newSocket.on('connect', () => {
       console.log('Connected to ASR service, socket id:', newSocket.id)
       setIsConnected(true)
-      setStatus('idle')
     })
 
     newSocket.on('disconnect', (reason) => {
@@ -99,15 +83,19 @@ export default function Home() {
       setIsConnected(false)
     })
 
-    newSocket.on('reconnect', (attemptNumber) => {
-      console.log('Reconnected after', attemptNumber, 'attempts')
-      setIsConnected(true)
-    })
-
     newSocket.on('job-created', (data) => {
       console.log('Job created:', data)
       setStatus('processing')
       setProgress(5)
+    })
+
+    newSocket.on('chunk-received', (data) => {
+      setUploadProgress(data.received / data.total * 100)
+    })
+
+    newSocket.on('upload-complete', () => {
+      console.log('Upload complete, starting transcription...')
+      setUploadProgress(100)
     })
 
     newSocket.on('progress', (data) => {
@@ -144,7 +132,6 @@ export default function Home() {
     setSocket(newSocket)
 
     return () => {
-      console.log('Cleaning up socket connection')
       newSocket.close()
     }
   }, [toast])
@@ -197,6 +184,7 @@ export default function Home() {
     setError(null)
     setStatus('idle')
     setProgress(0)
+    setUploadProgress(0)
   }, [toast])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -218,30 +206,61 @@ export default function Home() {
     setIsDragging(false)
   }, [])
 
-  const handleTranscribe = async () => {
-    if (!file) return
-
-    if (!socket || !isConnected) {
-      toast({
-        variant: 'destructive',
-        title: 'Нет подключения',
-        description: 'Ожидание подключения к серверу...',
-      })
-      return
+  // File to base64 chunk (browser-compatible)
+  const fileChunkToBase64 = (arrayBuffer: ArrayBuffer, start: number, end: number): string => {
+    const chunk = arrayBuffer.slice(start, end)
+    const bytes = new Uint8Array(chunk)
+    let binary = ''
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i])
     }
+    return btoa(binary)
+  }
+
+  const handleTranscribe = async () => {
+    if (!file || !socket || !isConnected) return
 
     setStatus('uploading')
     setProgress(0)
+    setUploadProgress(0)
     setError(null)
 
     try {
-      const base64Audio = await fileToBase64(file)
+      // Read entire file
+      const arrayBuffer = await file.arrayBuffer()
+      const totalSize = arrayBuffer.byteLength
+      const totalChunks = Math.ceil(totalSize / CHUNK_SIZE)
       
-      socket.emit('start-transcription', {
+      console.log(`File size: ${totalSize}, chunks: ${totalChunks}`)
+
+      // Send init message
+      socket.emit('start-upload', {
         fileName: file.name,
-        fileSize: file.size,
-        base64Audio
+        fileSize: totalSize,
+        totalChunks: totalChunks
       })
+
+      // Send chunks
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE
+        const end = Math.min(start + CHUNK_SIZE, totalSize)
+        const chunkBase64 = fileChunkToBase64(arrayBuffer, start, end)
+        
+        socket.emit('upload-chunk', {
+          chunkIndex: i,
+          chunkData: chunkBase64,
+          isLast: i === totalChunks - 1
+        })
+
+        setUploadProgress((i + 1) / totalChunks * 100)
+        
+        // Small delay between chunks to prevent overwhelming
+        if (i < totalChunks - 1) {
+          await new Promise(resolve => setTimeout(resolve, 10))
+        }
+      }
+
+      console.log('All chunks sent')
 
     } catch (err: any) {
       setStatus('error')
@@ -257,10 +276,7 @@ export default function Home() {
   const handleCopy = () => {
     if (result?.text) {
       navigator.clipboard.writeText(result.text)
-      toast({
-        title: 'Скопировано',
-        description: 'Текст транскрипции скопирован',
-      })
+      toast({ title: 'Скопировано', description: 'Текст скопирован' })
     }
   }
 
@@ -284,9 +300,8 @@ export default function Home() {
     setError(null)
     setStatus('idle')
     setProgress(0)
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
+    setUploadProgress(0)
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   return (
@@ -405,24 +420,38 @@ export default function Home() {
           </CardContent>
         </Card>
 
-        {/* Progress */}
-        {(status === 'uploading' || status === 'processing') && (
+        {/* Upload Progress */}
+        {status === 'uploading' && uploadProgress < 100 && (
+          <Card className="bg-slate-800/50 border-slate-700 backdrop-blur-sm mb-6">
+            <CardContent className="pt-6">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300 font-medium">Отправка файла</span>
+                  <span className="text-emerald-400 font-bold">{Math.round(uploadProgress)}%</span>
+                </div>
+                <Progress value={uploadProgress} className="h-2 bg-slate-700" />
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Processing Progress */}
+        {(status === 'processing') && (
           <Card className="bg-slate-800/50 border-slate-700 backdrop-blur-sm mb-6">
             <CardContent className="pt-6">
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-300 font-medium">Прогресс обработки</span>
+                  <span className="text-slate-300 font-medium">Распознавание речи</span>
                   <span className="text-emerald-400 font-bold">{progress}%</span>
                 </div>
                 <Progress value={progress} className="h-3 bg-slate-700 [&>div]:bg-gradient-to-r [&>div]:from-emerald-500 [&>div]:to-teal-500" />
                 <div className="flex items-center gap-2 text-slate-400 text-sm">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span>
-                    {progress < 20 && 'Отправка файла...'}
-                    {progress >= 20 && progress < 40 && 'Загрузка аудио...'}
-                    {progress >= 40 && progress < 70 && 'Распознавание речи...'}
-                    {progress >= 70 && progress < 90 && 'Обработка текста...'}
-                    {progress >= 90 && 'Финальная обработка...'}
+                    {progress < 20 && 'Загрузка аудио...'}
+                    {progress >= 20 && progress < 50 && 'Анализ речи...'}
+                    {progress >= 50 && progress < 80 && 'Распознавание текста...'}
+                    {progress >= 80 && 'Финальная обработка...'}
                   </span>
                 </div>
               </div>
@@ -481,39 +510,7 @@ export default function Home() {
           </Card>
         )}
 
-        {/* Features */}
-        {status === 'idle' && !file && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-8">
-            <Card className="bg-slate-800/30 border-slate-700/50">
-              <CardContent className="pt-6 text-center">
-                <div className="p-3 bg-emerald-500/20 rounded-full w-fit mx-auto mb-3">
-                  <Mic className="w-6 h-6 text-emerald-400" />
-                </div>
-                <h3 className="text-white font-medium mb-2">OpenAI Whisper</h3>
-                <p className="text-slate-400 text-sm">Локальная модель без внешних API</p>
-              </CardContent>
-            </Card>
-            <Card className="bg-slate-800/30 border-slate-700/50">
-              <CardContent className="pt-6 text-center">
-                <div className="p-3 bg-teal-500/20 rounded-full w-fit mx-auto mb-3">
-                  <Clock className="w-6 h-6 text-teal-400" />
-                </div>
-                <h3 className="text-white font-medium mb-2">Прогресс в реальном времени</h3>
-                <p className="text-slate-400 text-sm">Отслеживайте статус обработки</p>
-              </CardContent>
-            </Card>
-            <Card className="bg-slate-800/30 border-slate-700/50">
-              <CardContent className="pt-6 text-center">
-                <div className="p-3 bg-cyan-500/20 rounded-full w-fit mx-auto mb-3">
-                  <FileAudio className="w-6 h-6 text-cyan-400" />
-                </div>
-                <h3 className="text-white font-medium mb-2">До 100MB</h3>
-                <p className="text-slate-400 text-sm">Поддержка больших аудиофайлов</p>
-              </CardContent>
-            </Card>
-          </div>
-        )}
-
+        {/* Footer */}
         <div className="text-center mt-12 text-slate-500 text-sm">
           <p>Powered by OpenAI Whisper</p>
         </div>
