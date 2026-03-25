@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  speech-to-text:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: speech-to-text-ai
+    restart: unless-stopped
+    ports:
+      - "3010:3000"   # Next.js web app
+      - "3013:3003"   # WebSocket ASR service
+    volumes:
+      - ../data/speech-to-text-ai/data:/app/data
+      - ../data/speech-to-text-ai/logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - ASR_PORT=3003
+      - HOSTNAME=0.0.0.0
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - speech-to-text-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  speech-to-text-network:
+    driver: bridge
