@@ -10,9 +10,9 @@ const io = new Server(httpServer, {
     methods: ["GET", "POST"],
     credentials: false
   },
-  pingTimeout: 600000, // 10 minutes
+  pingTimeout: 600000,
   pingInterval: 25000,
-  maxHttpBufferSize: 150e6 // 150MB
+  maxHttpBufferSize: 150e6
 })
 
 const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || 'http://localhost:5000'
@@ -22,7 +22,7 @@ interface UploadSession {
   fileName: string
   fileSize: number
   totalChunks: number
-  receivedChunks: Map<number, string>
+  chunks: Map<number, Buffer>  // Store as Buffer, not base64 string!
   createdAt: Date
 }
 
@@ -37,18 +37,16 @@ interface TranscriptionJob {
   wordCount?: number
   processingTime?: number
   error?: string
-  startTime?: Date
-  endTime?: Date
 }
 
 const uploadSessions = new Map<string, UploadSession>()
 const jobs = new Map<string, TranscriptionJob>()
 
-// Clean up old upload sessions every 5 minutes
+// Clean up old sessions every 5 minutes
 setInterval(() => {
   const now = Date.now()
   for (const [id, session] of uploadSessions) {
-    if (now - session.createdAt.getTime() > 30 * 60 * 1000) { // 30 minutes
+    if (now - session.createdAt.getTime() > 30 * 60 * 1000) {
       uploadSessions.delete(id)
     }
   }
@@ -76,7 +74,7 @@ function simulateProgress(jobId: string, socket: any) {
 
 async function transcribeWithWhisper(
   jobId: string, 
-  base64Audio: string, 
+  audioBuffer: Buffer,  // Now receiving Buffer directly
   fileName: string, 
   fileSize: number, 
   socket: any
@@ -85,11 +83,9 @@ async function transcribeWithWhisper(
   if (!job) return
 
   job.status = 'processing'
-  job.startTime = new Date()
   const progressInterval = simulateProgress(jobId, socket)
 
   try {
-    const audioBuffer = Buffer.from(base64Audio, 'base64')
     const ext = fileName.split('.').pop()?.toLowerCase() || 'wav'
     
     const contentTypes: Record<string, string> = {
@@ -99,7 +95,7 @@ async function transcribeWithWhisper(
     }
     
     const contentType = contentTypes[ext] || 'audio/wav'
-    console.log(`Sending ${audioBuffer.length} bytes to Whisper service...`)
+    console.log(`Sending ${audioBuffer.length} bytes (${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB) to Whisper service...`)
 
     const formData = new FormData()
     formData.append('file', new Blob([audioBuffer], { type: contentType }), fileName)
@@ -124,7 +120,6 @@ async function transcribeWithWhisper(
     job.language = result.language
     job.wordCount = result.word_count
     job.processingTime = result.processing_time
-    job.endTime = new Date()
 
     socket.emit('completed', {
       jobId,
@@ -141,7 +136,6 @@ async function transcribeWithWhisper(
     
     job.status = 'failed'
     job.error = error.message || 'Unknown error'
-    job.endTime = new Date()
 
     socket.emit('error', { jobId, error: job.error })
     console.error(`Job ${jobId} failed:`, error)
@@ -159,7 +153,7 @@ io.on('connection', (socket) => {
       fileName: data.fileName,
       fileSize: data.fileSize,
       totalChunks: data.totalChunks,
-      receivedChunks: new Map(),
+      chunks: new Map(),  // Store Buffers
       createdAt: new Date()
     }
     uploadSessions.set(sessionId, session)
@@ -167,7 +161,6 @@ io.on('connection', (socket) => {
     socket.data.uploadSessionId = sessionId
     console.log(`Upload session ${sessionId} started: ${data.fileName}, ${data.fileSize} bytes, ${data.totalChunks} chunks`)
     
-    // Create job
     const jobId = randomUUID()
     const job: TranscriptionJob = {
       id: jobId,
@@ -196,30 +189,37 @@ io.on('connection', (socket) => {
       return
     }
 
-    // Store chunk
-    session.receivedChunks.set(data.chunkIndex, data.chunkData)
+    // Decode base64 to Buffer and store
+    const chunkBuffer = Buffer.from(data.chunkData, 'base64')
+    session.chunks.set(data.chunkIndex, chunkBuffer)
     
     socket.emit('chunk-received', {
-      received: session.receivedChunks.size,
+      received: session.chunks.size,
       total: session.totalChunks
     })
 
     // If all chunks received, combine and transcribe
-    if (data.isLast && session.receivedChunks.size === session.totalChunks) {
+    if (data.isLast && session.chunks.size === session.totalChunks) {
       console.log(`All ${session.totalChunks} chunks received for session ${sessionId}`)
       
       socket.emit('upload-complete')
       
-      // Combine chunks
-      let combinedBase64 = ''
+      // Combine chunks in order
+      const buffers: Buffer[] = []
+      let totalSize = 0
       for (let i = 0; i < session.totalChunks; i++) {
-        const chunk = session.receivedChunks.get(i)
+        const chunk = session.chunks.get(i)
         if (!chunk) {
           socket.emit('error', { error: `Missing chunk ${i}` })
           return
         }
-        combinedBase64 += chunk
+        buffers.push(chunk)
+        totalSize += chunk.length
       }
+
+      // Concatenate all buffers
+      const combinedBuffer = Buffer.concat(buffers, totalSize)
+      console.log(`Combined buffer size: ${combinedBuffer.length} bytes (${(combinedBuffer.length / 1024 / 1024).toFixed(2)} MB)`)
 
       // Clean up session
       uploadSessions.delete(sessionId)
@@ -228,36 +228,9 @@ io.on('connection', (socket) => {
       const jobId = socket.data.jobId
       if (jobId) {
         socket.emit('job-created', { jobId })
-        transcribeWithWhisper(jobId, combinedBase64, session.fileName, session.fileSize, socket)
+        transcribeWithWhisper(jobId, combinedBuffer, session.fileName, session.fileSize, socket)
       }
     }
-  })
-
-  // Legacy single-message upload (for small files)
-  socket.on('start-transcription', async (data: { 
-    fileName: string
-    fileSize: number
-    base64Audio: string 
-  }) => {
-    console.log(`Received legacy transcription request: ${data.fileName}, ${data.fileSize} bytes`)
-
-    if (data.fileSize > 100 * 1024 * 1024) {
-      socket.emit('error', { error: 'Файл слишком большой. Максимум: 100MB.' })
-      return
-    }
-
-    const jobId = randomUUID()
-    const job: TranscriptionJob = {
-      id: jobId,
-      status: 'pending',
-      progress: 0,
-      fileName: data.fileName,
-      fileSize: data.fileSize
-    }
-    jobs.set(jobId, job)
-
-    socket.emit('job-created', { jobId })
-    transcribeWithWhisper(jobId, data.base64Audio, data.fileName, data.fileSize, socket)
   })
 
   socket.on('disconnect', (reason) => {
