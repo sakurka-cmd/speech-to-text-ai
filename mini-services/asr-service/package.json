@@ -1,0 +1,13 @@
+{
+  "name": "asr-service",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1",
+    "z-ai-web-dev-sdk": "^0.0.17",
+    "uuid": "^11.1.0"
+  }
+}
