@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y \
     libsndfile1 \
     git \
     build-essential \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -34,9 +33,9 @@ ENV TMPDIR=/tmp/whisper
 
 EXPOSE 5000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:5000/health || exit 1
+# Health check using Python (more reliable than curl)
+HEALTHCHECK --interval=30s --timeout=15s --start-period=300s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
 
 # Run
 CMD ["python", "main.py"]
