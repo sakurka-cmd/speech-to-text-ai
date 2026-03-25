@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import ZAI from 'z-ai-web-dev-sdk'
 
-let zaiInstance: Awaited<ReturnType<typeof ZAI.create>> | null = null
+// Whisper service URL (internal Docker network)
+const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || 'http://whisper:5000'
 
 export async function POST(request: NextRequest) {
   try {
@@ -15,37 +15,45 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Check file size (max 10MB for direct API, use WebSocket for larger files)
+    // Check file size (max 10MB for REST API, use WebSocket for larger files)
     const maxSize = 10 * 1024 * 1024
     if (audioFile.size > maxSize) {
       return NextResponse.json(
         { 
           success: false, 
-          error: 'File too large for direct API. Please use WebSocket endpoint for files larger than 10MB.',
+          error: 'File too large for direct API. Use WebSocket for files larger than 10MB.',
           useWebSocket: true 
         },
         { status: 413 }
       )
     }
 
-    // Convert to base64
-    const arrayBuffer = await audioFile.arrayBuffer()
-    const base64Audio = Buffer.from(arrayBuffer).toString('base64')
+    // Forward to Whisper service
+    const whisperFormData = new FormData()
+    whisperFormData.append('file', audioFile, audioFile.name)
 
-    // Initialize ZAI
-    if (!zaiInstance) {
-      zaiInstance = await ZAI.create()
+    const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
+      method: 'POST',
+      body: whisperFormData
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      return NextResponse.json(
+        { success: false, error: errorData.detail || 'Whisper service error' },
+        { status: response.status }
+      )
     }
 
-    // Transcribe
-    const response = await zaiInstance.audio.asr.create({
-      file_base64: base64Audio
-    })
+    const result = await response.json()
 
     return NextResponse.json({
       success: true,
-      transcription: response.text,
-      wordCount: response.text.split(/\s+/).filter(w => w.length > 0).length,
+      transcription: result.text,
+      language: result.language,
+      wordCount: result.word_count,
+      duration: result.duration,
+      processingTime: result.processing_time,
       fileName: audioFile.name,
       fileSize: audioFile.size
     })
