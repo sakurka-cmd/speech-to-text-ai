@@ -19,7 +19,9 @@ import {
   Download,
   Trash2,
   Clock,
-  FileText
+  FileText,
+  Wifi,
+  WifiOff
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 
@@ -27,11 +29,12 @@ interface TranscriptionResult {
   text: string
   wordCount: number
   processingTime?: number
+  language?: string
   fileName: string
   fileSize: number
 }
 
-type Status = 'idle' | 'uploading' | 'processing' | 'completed' | 'error'
+type Status = 'idle' | 'connecting' | 'uploading' | 'processing' | 'completed' | 'error'
 
 export default function Home() {
   const [status, setStatus] = useState<Status>('idle')
@@ -40,21 +43,59 @@ export default function Home() {
   const [result, setResult] = useState<TranscriptionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [isConnected, setIsConnected] = useState(false)
   const [socket, setSocket] = useState<Socket | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
 
+  // File to base64 (browser-compatible)
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const arrayBuffer = reader.result as ArrayBuffer
+        const bytes = new Uint8Array(arrayBuffer)
+        let binary = ''
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i])
+        }
+        resolve(btoa(binary))
+      }
+      reader.onerror = reject
+      reader.readAsArrayBuffer(file)
+    })
+  }
+
   // Initialize WebSocket connection
   useEffect(() => {
-    const newSocket = io('/?XTransformPort=3003', {
+    // Determine WebSocket URL based on environment
+    const wsUrl = typeof window !== 'undefined' 
+      ? `${window.location.protocol}//${window.location.hostname}:3013`
+      : 'http://localhost:3013'
+
+    console.log('Connecting to WebSocket:', wsUrl)
+
+    const newSocket = io(wsUrl, {
       path: '/',
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10,
       reconnectionDelay: 1000,
+      timeout: 10000,
     })
 
     newSocket.on('connect', () => {
       console.log('Connected to ASR service')
+      setIsConnected(true)
+    })
+
+    newSocket.on('disconnect', () => {
+      console.log('Disconnected from ASR service')
+      setIsConnected(false)
+    })
+
+    newSocket.on('connect_error', (err) => {
+      console.error('WebSocket connection error:', err)
+      setIsConnected(false)
     })
 
     newSocket.on('job-created', (data) => {
@@ -73,12 +114,13 @@ export default function Home() {
         text: data.transcription,
         wordCount: data.wordCount,
         processingTime: data.processingTime,
+        language: data.language,
         fileName: file?.name || 'audio.wav',
         fileSize: file?.size || 0
       })
       toast({
         title: 'Транскрипция завершена',
-        description: `Обработано ${data.wordCount} слов за ${(data.processingTime / 1000).toFixed(1)}с`,
+        description: `Обработано ${data.wordCount} слов за ${((data.processingTime || 0) / 1000).toFixed(1)}с`,
       })
     })
 
@@ -92,16 +134,12 @@ export default function Home() {
       })
     })
 
-    newSocket.on('disconnect', () => {
-      console.log('Disconnected from ASR service')
-    })
-
     setSocket(newSocket)
 
     return () => {
       newSocket.close()
     }
-  }, [file, toast])
+  }, [toast])
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes'
@@ -123,16 +161,17 @@ export default function Home() {
 
   const handleFileSelect = useCallback((selectedFile: File) => {
     // Validate file type
-    const validTypes = ['audio/wav', 'audio/mp3', 'audio/mpeg', 'audio/m4a', 'audio/x-m4a', 
-                        'audio/flac', 'audio/ogg', 'audio/webm', 'video/webm']
-    const isValidType = validTypes.some(type => selectedFile.type.startsWith(type.split('/')[0])) ||
-                        selectedFile.name.match(/\.(wav|mp3|m4a|flac|ogg|webm)$/i)
+    const validExtensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.webm', '.mp4', '.mpeg', '.mpga', '.oga']
+    const ext = '.' + selectedFile.name.split('.').pop()?.toLowerCase()
+    const isValidType = selectedFile.type.startsWith('audio/') || 
+                        selectedFile.type.startsWith('video/') ||
+                        validExtensions.includes(ext)
 
     if (!isValidType) {
       toast({
         variant: 'destructive',
         title: 'Неподдерживаемый формат',
-        description: 'Поддерживаются: WAV, MP3, M4A, FLAC, OGG, WebM',
+        description: 'Поддерживаются: WAV, MP3, M4A, FLAC, OGG, WebM, MP4',
       })
       return
     }
@@ -177,54 +216,38 @@ export default function Home() {
   const handleTranscribe = async () => {
     if (!file) return
 
+    // Check WebSocket connection
+    if (!socket || !isConnected) {
+      toast({
+        variant: 'destructive',
+        title: 'Нет подключения',
+        description: 'Ожидание подключения к серверу...',
+      })
+      return
+    }
+
     setStatus('uploading')
     setProgress(0)
     setError(null)
 
     try {
-      // Convert file to base64
-      const arrayBuffer = await file.arrayBuffer()
-      const base64Audio = Buffer.from(arrayBuffer).toString('base64')
+      // Convert file to base64 (browser-compatible)
+      const base64Audio = await fileToBase64(file)
 
-      // Use WebSocket for better UX with progress
-      if (socket && socket.connected) {
-        socket.emit('start-transcription', {
-          fileName: file.name,
-          fileSize: file.size,
-          base64Audio
-        })
-      } else {
-        // Fallback to REST API for smaller files
-        const formData = new FormData()
-        formData.append('audio', file)
+      // Send via WebSocket
+      socket.emit('start-transcription', {
+        fileName: file.name,
+        fileSize: file.size,
+        base64Audio
+      })
 
-        const response = await fetch('/api/transcribe', {
-          method: 'POST',
-          body: formData
-        })
-
-        const data = await response.json()
-
-        if (!response.ok) {
-          throw new Error(data.error || 'Transcription failed')
-        }
-
-        setStatus('completed')
-        setProgress(100)
-        setResult({
-          text: data.transcription,
-          wordCount: data.wordCount,
-          fileName: data.fileName,
-          fileSize: data.fileSize
-        })
-      }
     } catch (err: any) {
       setStatus('error')
-      setError(err.message || 'Произошла ошибка при обработке файла')
+      setError(err.message || 'Ошибка при чтении файла')
       toast({
         variant: 'destructive',
         title: 'Ошибка',
-        description: err.message || 'Произошла ошибка при обработке файла',
+        description: err.message || 'Ошибка при чтении файла',
       })
     }
   }
@@ -278,8 +301,21 @@ export default function Home() {
             </h1>
           </div>
           <p className="text-slate-400 text-lg">
-            Распознавание речи из аудиофайлов с использованием AI
+            Распознавание речи из аудиофайлов с использованием Whisper AI
           </p>
+          <div className="flex items-center justify-center gap-2 mt-3">
+            {isConnected ? (
+              <Badge variant="secondary" className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
+                <Wifi className="w-3 h-3 mr-1" />
+                Сервер подключен
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
+                <WifiOff className="w-3 h-3 mr-1" />
+                Подключение...
+              </Badge>
+            )}
+          </div>
         </div>
 
         {/* Upload Area */}
@@ -290,7 +326,7 @@ export default function Home() {
               Загрузка файла
             </CardTitle>
             <CardDescription className="text-slate-400">
-              Поддерживаемые форматы: WAV, MP3, M4A, FLAC, OGG, WebM (до 100MB)
+              Поддерживаемые форматы: WAV, MP3, M4A, FLAC, OGG, WebM, MP4 (до 100MB)
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -310,7 +346,7 @@ export default function Home() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="audio/*,video/webm"
+                accept="audio/*,video/webm,video/mp4,.wav,.mp3,.m4a,.flac,.ogg,.webm,.mp4"
                 className="hidden"
                 onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
               />
@@ -344,8 +380,8 @@ export default function Home() {
             <div className="flex gap-3 mt-4">
               <Button
                 onClick={handleTranscribe}
-                disabled={!file || status === 'processing' || status === 'uploading'}
-                className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-medium py-6 text-lg shadow-lg shadow-emerald-500/25"
+                disabled={!file || status === 'processing' || status === 'uploading' || !isConnected}
+                className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-medium py-6 text-lg shadow-lg shadow-emerald-500/25 disabled:opacity-50"
               >
                 {status === 'uploading' || status === 'processing' ? (
                   <>
@@ -365,6 +401,7 @@ export default function Home() {
                   onClick={handleReset}
                   variant="outline"
                   className="border-slate-600 text-slate-300 hover:bg-slate-700"
+                  disabled={status === 'processing' || status === 'uploading'}
                 >
                   <Trash2 className="w-5 h-5" />
                 </Button>
@@ -389,9 +426,10 @@ export default function Home() {
                 <div className="flex items-center gap-2 text-slate-400 text-sm">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span>
-                    {progress < 30 && 'Загрузка аудио...'}
-                    {progress >= 30 && progress < 60 && 'Анализ речи...'}
-                    {progress >= 60 && progress < 90 && 'Распознавание текста...'}
+                    {progress < 20 && 'Отправка файла...'}
+                    {progress >= 20 && progress < 40 && 'Загрузка аудио...'}
+                    {progress >= 40 && progress < 70 && 'Распознавание речи...'}
+                    {progress >= 70 && progress < 90 && 'Обработка текста...'}
                     {progress >= 90 && 'Финальная обработка...'}
                   </span>
                 </div>
@@ -455,6 +493,11 @@ export default function Home() {
                     {formatTime(result.processingTime)}
                   </Badge>
                 )}
+                {result.language && (
+                  <Badge variant="secondary" className="bg-slate-700 text-slate-300">
+                    Язык: {result.language}
+                  </Badge>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -476,9 +519,9 @@ export default function Home() {
                 <div className="p-3 bg-emerald-500/20 rounded-full w-fit mx-auto mb-3">
                   <Mic className="w-6 h-6 text-emerald-400" />
                 </div>
-                <h3 className="text-white font-medium mb-2">Высокое качество</h3>
+                <h3 className="text-white font-medium mb-2">OpenAI Whisper</h3>
                 <p className="text-slate-400 text-sm">
-                  Продвинутая AI модель для точного распознавания речи
+                  Локальная модель без внешних API и токенов
                 </p>
               </CardContent>
             </Card>
@@ -488,9 +531,9 @@ export default function Home() {
                 <div className="p-3 bg-teal-500/20 rounded-full w-fit mx-auto mb-3">
                   <Clock className="w-6 h-6 text-teal-400" />
                 </div>
-                <h3 className="text-white font-medium mb-2">Быстрая обработка</h3>
+                <h3 className="text-white font-medium mb-2">Прогресс в реальном времени</h3>
                 <p className="text-slate-400 text-sm">
-                  Оптимизированный алгоритм для быстрой транскрипции
+                  Отслеживайте статус обработки файла
                 </p>
               </CardContent>
             </Card>
@@ -500,9 +543,9 @@ export default function Home() {
                 <div className="p-3 bg-cyan-500/20 rounded-full w-fit mx-auto mb-3">
                   <FileAudio className="w-6 h-6 text-cyan-400" />
                 </div>
-                <h3 className="text-white font-medium mb-2">Много форматов</h3>
+                <h3 className="text-white font-medium mb-2">До 100MB</h3>
                 <p className="text-slate-400 text-sm">
-                  Поддержка WAV, MP3, M4A, FLAC, OGG и WebM
+                  Поддержка больших аудиофайлов
                 </p>
               </CardContent>
             </Card>
@@ -511,7 +554,7 @@ export default function Home() {
 
         {/* Footer */}
         <div className="text-center mt-12 text-slate-500 text-sm">
-          <p>Powered by Z.ai Speech Recognition API</p>
+          <p>Powered by OpenAI Whisper</p>
         </div>
       </div>
     </div>
