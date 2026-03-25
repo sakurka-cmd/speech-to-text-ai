@@ -1,5 +1,5 @@
 #!/bin/bash
-# Быстрая установка Speech to Text AI на сервер
+# Установка Speech to Text AI на сервер
 # Запуск: sudo ./install.sh
 
 set -e
@@ -34,7 +34,6 @@ echo -e "${GREEN}✓ Структура Docker найдена${NC}"
 # Создание директорий
 echo -e "${YELLOW}Создание директорий...${NC}"
 mkdir -p "${COMPOSE_DIR}" "${DATA_DIR}"/{data,logs,uploads}
-chown -R 1001:1001 "${DATA_DIR}"
 echo -e "${GREEN}✓ Директории созданы${NC}"
 
 # Клонирование
@@ -47,8 +46,41 @@ else
 fi
 echo -e "${GREEN}✓ Репозиторий готов${NC}"
 
+# Проверка/создание конфига Z.ai
+echo ""
+ZAI_CONFIG="${DATA_DIR}/.z-ai-config"
+if [ ! -f "${ZAI_CONFIG}" ]; then
+    echo -e "${YELLOW}Создание конфигурационного файла Z.ai...${NC}"
+    echo ""
+    echo -e "${BLUE}Для работы приложения необходим API ключ Z.ai${NC}"
+    echo -e "Получите ключ на: ${GREEN}https://z.ai${NC}"
+    echo ""
+    read -p "Введите baseUrl (например, https://api.z.ai/v1): " BASE_URL
+    read -p "Введите apiKey: " API_KEY
+    read -p "Введите chatId: " CHAT_ID
+    read -p "Введите token: " TOKEN
+    read -p "Введите userId: " USER_ID
+    
+    cat > "${ZAI_CONFIG}" << EOF
+{
+  "baseUrl": "${BASE_URL}",
+  "apiKey": "${API_KEY}",
+  "chatId": "${CHAT_ID}",
+  "token": "${TOKEN}",
+  "userId": "${USER_ID}"
+}
+EOF
+    echo -e "${GREEN}✓ Конфигурационный файл создан: ${ZAI_CONFIG}${NC}"
+else
+    echo -e "${GREEN}✓ Конфигурационный файл уже существует: ${ZAI_CONFIG}${NC}"
+fi
+
+# Права
+chown -R 1001:1001 "${DATA_DIR}"
+chmod 600 "${ZAI_CONFIG}"
+
 # Создание docker-start.sh
-cat > docker-start.sh << 'EOF'
+cat > "${COMPOSE_DIR}/docker-start.sh" << 'EOF'
 #!/bin/sh
 set -e
 echo "Starting Speech to Text AI..."
@@ -60,11 +92,10 @@ sleep 2
 node server.js
 trap "kill $ASR_PID 2>/dev/null" EXIT
 EOF
-chmod +x docker-start.sh
+chmod +x "${COMPOSE_DIR}/docker-start.sh"
 
 # Создание docker-compose.yml
-cat > docker-compose.yml << 'EOF'
-version: '3.8'
+cat > "${COMPOSE_DIR}/docker-compose.yml" << 'EOF'
 services:
   speech-to-text:
     build:
@@ -78,6 +109,7 @@ services:
     volumes:
       - ../data/speech-to-text-ai/data:/app/data
       - ../data/speech-to-text-ai/logs:/app/logs
+      - ../data/speech-to-text-ai/.z-ai-config:/app/.z-ai-config:ro
     environment:
       - NODE_ENV=production
       - PORT=3000
@@ -102,7 +134,7 @@ networks:
 EOF
 
 # Создание Dockerfile
-cat > Dockerfile << 'EOF'
+cat > "${COMPOSE_DIR}/Dockerfile" << 'EOF'
 FROM node:20-alpine AS base
 FROM base AS deps
 RUN apk add --no-cache libc6-compat
@@ -134,7 +166,7 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/mini-services ./mini-services
-RUN mkdir -p /app/data/uploads && chown -R nextjs:nodejs /app/data
+RUN mkdir -p /app/config /app/data/uploads && chown -R nextjs:nodejs /app/data /app/config
 COPY docker-start.sh /app/docker-start.sh
 RUN chmod +x /app/docker-start.sh
 USER nextjs
@@ -164,6 +196,8 @@ echo -e "${GREEN}========================================${NC}"
 echo ""
 echo -e "🌐 Web интерфейс:  http://<IP-сервера>:3010"
 echo -e "🔌 WebSocket:      ws://<IP-сервера>:3013"
+echo ""
+echo -e "📁 Конфиг Z.ai:    ${ZAI_CONFIG}"
 echo ""
 echo -e "Управление:"
 echo -e "  cd ${COMPOSE_DIR}"

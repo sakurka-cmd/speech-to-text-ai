@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   speech-to-text:
     build:
@@ -13,6 +11,8 @@ services:
     volumes:
       - ../data/speech-to-text-ai/data:/app/data
       - ../data/speech-to-text-ai/logs:/app/logs
+      # Монтируем конфиг Z.ai SDK
+      - ../data/speech-to-text-ai/.z-ai-config:/app/.z-ai-config:ro
     environment:
       - NODE_ENV=production
       - PORT=3000
