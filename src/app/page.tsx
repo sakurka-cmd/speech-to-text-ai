@@ -8,23 +8,27 @@ import { Progress } from '@/components/ui/progress'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { 
-  Mic, 
-  Upload, 
-  FileAudio, 
-  Loader2, 
-  CheckCircle2, 
-  XCircle, 
-  Copy, 
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Mic,
+  Upload,
+  FileAudio,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  Copy,
   Download,
   Trash2,
   Clock,
   FileText,
   Wifi,
   WifiOff,
-  AlertTriangle
+  AlertTriangle,
+  Play,
+  Scissors
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
+import WaveformEditor from '@/components/audio/WaveformEditor'
 
 const CHUNK_SIZE = 1024 * 1024 // 1MB chunks
 
@@ -37,6 +41,11 @@ interface TranscriptionResult {
   fileSize: number
 }
 
+interface AudioRegion {
+  start: number
+  end: number
+}
+
 type Status = 'idle' | 'connecting' | 'uploading' | 'processing' | 'completed' | 'error'
 
 export default function Home() {
@@ -44,12 +53,17 @@ export default function Home() {
   const [progress, setProgress] = useState(0)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [file, setFile] = useState<File | null>(null)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [result, setResult] = useState<TranscriptionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [socket, setSocket] = useState<Socket | null>(null)
   const [processingTime, setProcessingTime] = useState(0)
+  const [selectedRegion, setSelectedRegion] = useState<AudioRegion | null>(null)
+  const [trimmedBlob, setTrimmedBlob] = useState<Blob | null>(null)
+  const [trimmedFileName, setTrimmedFileName] = useState<string>('')
+  const [transcriptionMode, setTranscriptionMode] = useState<'full' | 'selection'>('full')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const processingStartTime = useRef<number>(0)
   const { toast } = useToast()
@@ -69,7 +83,7 @@ export default function Home() {
   // Initialize WebSocket
   useEffect(() => {
     const wsUrl = typeof window !== 'undefined' ? window.location.origin : ''
-    
+
     const newSocket = io(wsUrl, {
       path: '/socket.io',
       transports: ['websocket', 'polling'],
@@ -150,6 +164,15 @@ export default function Home() {
     return () => { newSocket.close() }
   }, [toast])
 
+  // Cleanup audio URL
+  useEffect(() => {
+    return () => {
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl)
+      }
+    }
+  }, [audioUrl])
+
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes'
     const k = 1024
@@ -165,12 +188,18 @@ export default function Home() {
     return `${secs}с`
   }
 
+  const formatTimeShort = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
+
   const handleFileSelect = useCallback((selectedFile: File) => {
     const validExtensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.webm', '.mp4', '.mpeg', '.mpga', '.oga']
     const ext = '.' + selectedFile.name.split('.').pop()?.toLowerCase()
-    const isValidType = selectedFile.type.startsWith('audio/') || 
-                        selectedFile.type.startsWith('video/') ||
-                        validExtensions.includes(ext)
+    const isValidType = selectedFile.type.startsWith('audio/') ||
+      selectedFile.type.startsWith('video/') ||
+      validExtensions.includes(ext)
 
     if (!isValidType) {
       toast({ variant: 'destructive', title: 'Неподдерживаемый формат' })
@@ -182,14 +211,23 @@ export default function Home() {
       return
     }
 
+    // Cleanup previous URL
+    if (audioUrl) {
+      URL.revokeObjectURL(audioUrl)
+    }
+
     setFile(selectedFile)
+    const url = URL.createObjectURL(selectedFile)
+    setAudioUrl(url)
     setResult(null)
     setError(null)
     setStatus('idle')
     setProgress(0)
     setUploadProgress(0)
     setProcessingTime(0)
-  }, [toast])
+    setTrimmedBlob(null)
+    setSelectedRegion(null)
+  }, [audioUrl, toast])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -207,8 +245,42 @@ export default function Home() {
     setIsDragging(false)
   }, [])
 
+  const handleRegionChange = useCallback((start: number, end: number) => {
+    setSelectedRegion({ start, end })
+  }, [])
+
+  const handleTrimmedAudio = useCallback((blob: Blob, start: number, end: number) => {
+    setTrimmedBlob(blob)
+    const baseName = file?.name.replace(/\.[^/.]+$/, '') || 'audio'
+    setTrimmedFileName(`${baseName}_${formatTimeShort(start)}-${formatTimeShort(end)}.wav`)
+
+    // Create URL for trimmed audio
+    const url = URL.createObjectURL(blob)
+    setAudioUrl(url)
+    setFile(new File([blob], `${baseName}_trimmed.wav`, { type: 'audio/wav' }))
+
+    // Reset region for new file
+    setSelectedRegion(null)
+
+    toast({
+      title: 'Аудио обрезано',
+      description: `Создан файл ${formatTimeShort(start)}-${formatTimeShort(end)}`,
+    })
+  }, [file?.name, toast])
+
   const handleTranscribe = async () => {
-    if (!file || !socket || !isConnected) return
+    if (!socket || !isConnected) return
+
+    let fileToTranscribe: File | null = file
+    let fileSize = file?.size || 0
+
+    // If mode is selection and we have a trimmed blob, use that
+    if (transcriptionMode === 'selection' && trimmedBlob) {
+      fileToTranscribe = new File([trimmedBlob], trimmedFileName || 'trimmed.wav', { type: 'audio/wav' })
+      fileSize = trimmedBlob.size
+    }
+
+    if (!fileToTranscribe) return
 
     setStatus('uploading')
     setProgress(0)
@@ -216,14 +288,14 @@ export default function Home() {
     setError(null)
 
     try {
-      const arrayBuffer = await file.arrayBuffer()
+      const arrayBuffer = await fileToTranscribe.arrayBuffer()
       const totalSize = arrayBuffer.byteLength
       const totalChunks = Math.ceil(totalSize / CHUNK_SIZE)
-      
+
       console.log(`File: ${totalSize} bytes, ${totalChunks} chunks`)
 
       socket.emit('start-upload', {
-        fileName: file.name,
+        fileName: fileToTranscribe.name,
         fileSize: totalSize,
         totalChunks: totalChunks
       })
@@ -241,7 +313,7 @@ export default function Home() {
           binary += String.fromCharCode(bytes[j])
         }
         const chunkBase64 = btoa(binary)
-        
+
         socket.emit('upload-chunk', {
           chunkIndex: i,
           chunkData: chunkBase64,
@@ -249,7 +321,7 @@ export default function Home() {
         })
 
         setUploadProgress((i + 1) / totalChunks * 100)
-        
+
         if (i < totalChunks - 1) {
           await new Promise(r => setTimeout(r, 50))
         }
@@ -283,23 +355,40 @@ export default function Home() {
     }
   }
 
+  const handleDownloadTrimmed = () => {
+    if (trimmedBlob) {
+      const url = URL.createObjectURL(trimmedBlob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = trimmedFileName || 'trimmed.wav'
+      a.click()
+      URL.revokeObjectURL(url)
+    }
+  }
+
   const handleReset = () => {
+    if (audioUrl) {
+      URL.revokeObjectURL(audioUrl)
+    }
     setFile(null)
+    setAudioUrl(null)
     setResult(null)
     setError(null)
     setStatus('idle')
     setProgress(0)
     setUploadProgress(0)
     setProcessingTime(0)
+    setTrimmedBlob(null)
+    setSelectedRegion(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   // Estimate processing time based on file size
-  const estimatedTime = file ? Math.ceil(file.size / (1024 * 1024) * 0.5) : 0 // ~30s per MB
+  const estimatedTime = file ? Math.ceil(file.size / (1024 * 1024) * 0.5) : 0
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
-      <div className="container mx-auto px-4 py-8 max-w-4xl">
+      <div className="container mx-auto px-4 py-8 max-w-5xl">
         {/* Header */}
         <div className="text-center mb-8">
           <div className="flex items-center justify-center gap-3 mb-4">
@@ -329,90 +418,190 @@ export default function Home() {
           <Alert className="bg-yellow-500/10 border-yellow-500/50 mb-6">
             <AlertTriangle className="w-5 h-5 text-yellow-400" />
             <AlertDescription className="text-yellow-300">
-              Большой файл (~{formatFileSize(file.size)}). Обработка займёт примерно {estimatedTime} минут. 
+              Большой файл (~{formatFileSize(file.size)}). Обработка займёт примерно {estimatedTime} минут.
               Не закрывайте страницу во время обработки.
             </AlertDescription>
           </Alert>
         )}
 
-        {/* Upload Area */}
-        <Card className="bg-slate-800/50 border-slate-700 mb-6">
-          <CardHeader>
-            <CardTitle className="text-white flex items-center gap-2">
-              <Upload className="w-5 h-5 text-emerald-400" />
-              Загрузка файла
-            </CardTitle>
-            <CardDescription className="text-slate-400">
-              WAV, MP3, M4A, FLAC, OGG, WebM, MP4 (до 100MB)
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div
-              className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all
+        <Tabs defaultValue="upload" className="space-y-6">
+          <TabsList className="grid w-full grid-cols-2 bg-slate-800/50">
+            <TabsTrigger value="upload" className="data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400">
+              <Upload className="w-4 h-4 mr-2" />
+              Загрузка
+            </TabsTrigger>
+            <TabsTrigger value="editor" disabled={!audioUrl} className="data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400">
+              <Scissors className="w-4 h-4 mr-2" />
+              Редактор
+            </TabsTrigger>
+          </TabsList>
+
+          {/* Upload Tab */}
+          <TabsContent value="upload" className="space-y-6">
+            {/* Upload Area */}
+            <Card className="bg-slate-800/50 border-slate-700">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center gap-2">
+                  <Upload className="w-5 h-5 text-emerald-400" />
+                  Загрузка файла
+                </CardTitle>
+                <CardDescription className="text-slate-400">
+                  WAV, MP3, M4A, FLAC, OGG, WebM, MP4 (до 100MB)
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div
+                  className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all
                 ${isDragging ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-600 hover:border-slate-500'}
                 ${file ? 'border-emerald-500/50 bg-emerald-500/5' : ''}`}
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="audio/*,video/webm,video/mp4,.wav,.mp3,.m4a,.flac,.ogg,.webm,.mp4"
-                className="hidden"
-                onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
-              />
-              
-              {file ? (
-                <div className="flex items-center justify-center gap-3">
-                  <FileAudio className="w-12 h-12 text-emerald-400" />
-                  <div className="text-left">
-                    <p className="text-white font-medium">{file.name}</p>
-                    <p className="text-slate-400 text-sm">{formatFileSize(file.size)}</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <Upload className="w-12 h-12 text-slate-400 mx-auto" />
-                  <p className="text-white font-medium">Перетащите файл сюда</p>
-                  <p className="text-slate-400 text-sm">или нажмите для выбора</p>
-                </div>
-              )}
-            </div>
-
-            <div className="flex gap-3 mt-4">
-              <Button
-                onClick={handleTranscribe}
-                disabled={!file || status === 'processing' || status === 'uploading' || !isConnected}
-                className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
-              >
-                {status === 'uploading' || status === 'processing' ? (
-                  <>
-                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                    Обработка...
-                  </>
-                ) : (
-                  <>
-                    <Mic className="w-5 h-5 mr-2" />
-                    Распознать речь
-                  </>
-                )}
-              </Button>
-              
-              {file && (
-                <Button
-                  onClick={handleReset}
-                  variant="outline"
-                  className="border-slate-600 text-slate-300"
-                  disabled={status === 'processing' || status === 'uploading'}
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onClick={() => fileInputRef.current?.click()}
                 >
-                  <Trash2 className="w-5 h-5" />
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="audio/*,video/webm,video/mp4,.wav,.mp3,.m4a,.flac,.ogg,.webm,.mp4"
+                    className="hidden"
+                    onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
+                  />
+
+                  {file ? (
+                    <div className="flex items-center justify-center gap-3">
+                      <FileAudio className="w-12 h-12 text-emerald-400" />
+                      <div className="text-left">
+                        <p className="text-white font-medium">{file.name}</p>
+                        <p className="text-slate-400 text-sm">{formatFileSize(file.size)}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <Upload className="w-12 h-12 text-slate-400 mx-auto" />
+                      <p className="text-white font-medium">Перетащите файл сюда</p>
+                      <p className="text-slate-400 text-sm">или нажмите для выбора</p>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Editor Tab */}
+          <TabsContent value="editor" className="space-y-6">
+            <Card className="bg-slate-800/50 border-slate-700">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center gap-2">
+                  <FileAudio className="w-5 h-5 text-emerald-400" />
+                  Аудио редактор
+                </CardTitle>
+                <CardDescription className="text-slate-400">
+                  Прослушайте аудио, выберите участок для транскрипции
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <WaveformEditor
+                  audioFile={file}
+                  audioUrl={audioUrl}
+                  onRegionChange={handleRegionChange}
+                  onTrimmedAudio={handleTrimmedAudio}
+                />
+              </CardContent>
+            </Card>
+
+            {/* Trimmed audio info */}
+            {trimmedBlob && (
+              <Alert className="bg-emerald-500/10 border-emerald-500/50">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                <AlertDescription className="text-emerald-300">
+                  Вырезанный фрагмент: {formatFileSize(trimmedBlob.size)} ({trimmedFileName})
+                  <Button variant="link" size="sm" onClick={handleDownloadTrimmed} className="text-emerald-400 ml-2 p-0">
+                    <Download className="w-4 h-4 mr-1" /> Скачать
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            )}
+          </TabsContent>
+        </Tabs>
+
+        {/* Transcription Mode Selection */}
+        {audioUrl && status === 'idle' && (
+          <Card className="bg-slate-800/50 border-slate-700 mt-6">
+            <CardHeader>
+              <CardTitle className="text-white flex items-center gap-2">
+                <Mic className="w-5 h-5 text-emerald-400" />
+                Распознавание речи
+              </CardTitle>
+              <CardDescription className="text-slate-400">
+                Выберите режим распознавания
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Button
+                  variant={transcriptionMode === 'full' ? 'default' : 'outline'}
+                  onClick={() => setTranscriptionMode('full')}
+                  className={`h-auto py-4 ${transcriptionMode === 'full' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600'}`}
+                >
+                  <div className="text-left">
+                    <div className="font-medium">Весь файл</div>
+                    <div className="text-xs opacity-70">
+                      {file && `${formatFileSize(file.size)}`}
+                    </div>
+                  </div>
                 </Button>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+                <Button
+                  variant={transcriptionMode === 'selection' ? 'default' : 'outline'}
+                  onClick={() => setTranscriptionMode('selection')}
+                  disabled={!selectedRegion && !trimmedBlob}
+                  className={`h-auto py-4 ${transcriptionMode === 'selection' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600'}`}
+                >
+                  <div className="text-left">
+                    <div className="font-medium">Выбранный участок</div>
+                    <div className="text-xs opacity-70">
+                      {selectedRegion
+                        ? `${formatTimeShort(selectedRegion.start)} - ${formatTimeShort(selectedRegion.end)}`
+                        : trimmedBlob
+                          ? formatFileSize(trimmedBlob.size)
+                          : 'Выберите участок'}
+                    </div>
+                  </div>
+                </Button>
+              </div>
+
+              <div className="flex gap-3 mt-4">
+                <Button
+                  onClick={handleTranscribe}
+                  disabled={!file || status === 'processing' || status === 'uploading' || !isConnected}
+                  className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
+                >
+                  {status === 'uploading' || status === 'processing' ? (
+                    <>
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                      Обработка...
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="w-5 h-5 mr-2" />
+                      Распознать {transcriptionMode === 'selection' ? 'участок' : 'всё'}
+                    </>
+                  )}
+                </Button>
+
+                {file && (
+                  <Button
+                    onClick={handleReset}
+                    variant="outline"
+                    className="border-slate-600 text-slate-300"
+                    disabled={status === 'processing' || status === 'uploading'}
+                  >
+                    <Trash2 className="w-5 h-5" />
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Progress */}
         {(status === 'uploading' || status === 'processing') && (
@@ -424,7 +613,7 @@ export default function Home() {
                   <Clock className="w-6 h-6" />
                   {formatTime(processingTime)}
                 </div>
-                
+
                 {/* Upload progress */}
                 {uploadProgress < 100 && (
                   <div>
@@ -435,7 +624,7 @@ export default function Home() {
                     <Progress value={uploadProgress} className="h-2" />
                   </div>
                 )}
-                
+
                 {/* Processing progress */}
                 <div>
                   <div className="flex justify-between text-sm mb-1">
@@ -444,14 +633,14 @@ export default function Home() {
                   </div>
                   <Progress value={progress} className="h-3" />
                 </div>
-                
+
                 <p className="text-center text-slate-400 text-sm">
                   {progress < 20 && 'Анализ аудио...'}
                   {progress >= 20 && progress < 50 && 'Распознавание речи...'}
                   {progress >= 50 && progress < 80 && 'Обработка текста...'}
                   {progress >= 80 && 'Почти готово...'}
                 </p>
-                
+
                 <p className="text-center text-yellow-400 text-xs">
                   ⏱ Не закрывайте страницу. Обработка может занять до 30 минут для больших файлов.
                 </p>
