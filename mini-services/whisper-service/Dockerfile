@@ -7,9 +7,13 @@ RUN apt-get update && apt-get install -y \
     libsndfile1 \
     git \
     build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Upgrade pip and install setuptools first
+RUN pip install --upgrade pip setuptools wheel
 
 # Install Python dependencies
 COPY requirements.txt .
@@ -28,13 +32,10 @@ ENV WHISPER_DEVICE=cpu
 ENV PORT=5000
 ENV TMPDIR=/tmp/whisper
 
-# Pre-download model during build (optional, comment out for smaller image)
-# RUN python -c "import whisper; whisper.load_model('small')"
-
 EXPOSE 5000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:5000/health || exit 1
 
 # Run
