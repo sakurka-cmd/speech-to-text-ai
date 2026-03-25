@@ -1,4 +1,4 @@
-# Whisper ASR Service Dockerfile
+# Whisper ASR Service Dockerfile (CPU-only)
 FROM python:3.11-slim
 
 # Install system dependencies
@@ -14,9 +14,12 @@ WORKDIR /app
 # Upgrade pip and install setuptools first
 RUN pip install --upgrade pip setuptools wheel
 
-# Install Python dependencies
+# Install CPU-only PyTorch FIRST (avoid downloading CUDA)
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Copy requirements and install rest
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir openai-whisper fastapi uvicorn[standard] websockets python-multipart
 
 # Copy application
 COPY main.py .
@@ -33,7 +36,7 @@ ENV TMPDIR=/tmp/whisper
 
 EXPOSE 5000
 
-# Health check using Python (more reliable than curl)
+# Health check using Python
 HEALTHCHECK --interval=30s --timeout=15s --start-period=300s --retries=5 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
 

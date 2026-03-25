@@ -8,7 +8,4 @@ python-multipart>=0.0.20
 openai-whisper>=20240930
 setuptools>=75.0.0
 
-# Audio processing
-torch>=2.0.0
-torchaudio>=2.0.0
-numpy>=1.24.0
+# Note: torch and torchaudio are installed separately from CPU index
