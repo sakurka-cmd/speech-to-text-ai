@@ -68,10 +68,9 @@ export default function Home() {
 
   // Initialize WebSocket connection
   useEffect(() => {
-    // Get WebSocket URL - use same host but port 3013
-    const hostname = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
-    const protocol = typeof window !== 'undefined' ? window.location.protocol : 'http:'
-    const wsUrl = `${protocol}//${hostname}:3013`
+    // Use relative URL - will work through Nginx proxy
+    // Nginx should proxy /socket.io/ to the asr-proxy service
+    const wsUrl = typeof window !== 'undefined' ? window.location.origin : ''
     
     console.log('Connecting to WebSocket:', wsUrl)
 
@@ -82,7 +81,6 @@ export default function Home() {
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
       timeout: 10000,
-      withCredentials: false,
     })
 
     newSocket.on('connect', () => {
@@ -106,10 +104,6 @@ export default function Home() {
       setIsConnected(true)
     })
 
-    newSocket.on('reconnect_error', (err) => {
-      console.error('Reconnection error:', err.message)
-    })
-
     newSocket.on('job-created', (data) => {
       console.log('Job created:', data)
       setStatus('processing')
@@ -117,12 +111,10 @@ export default function Home() {
     })
 
     newSocket.on('progress', (data) => {
-      console.log('Progress:', data.progress)
       setProgress(Math.round(data.progress))
     })
 
     newSocket.on('completed', (data) => {
-      console.log('Completed:', data)
       setProgress(100)
       setStatus('completed')
       setResult({
@@ -140,7 +132,6 @@ export default function Home() {
     })
 
     newSocket.on('error', (data) => {
-      console.error('Server error:', data)
       setStatus('error')
       setError(data.error)
       toast({
@@ -177,7 +168,6 @@ export default function Home() {
   }
 
   const handleFileSelect = useCallback((selectedFile: File) => {
-    // Validate file type
     const validExtensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.webm', '.mp4', '.mpeg', '.mpga', '.oga']
     const ext = '.' + selectedFile.name.split('.').pop()?.toLowerCase()
     const isValidType = selectedFile.type.startsWith('audio/') || 
@@ -193,7 +183,6 @@ export default function Home() {
       return
     }
 
-    // Validate file size (max 100MB)
     if (selectedFile.size > 100 * 1024 * 1024) {
       toast({
         variant: 'destructive',
@@ -213,7 +202,6 @@ export default function Home() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(false)
-    
     const droppedFile = e.dataTransfer.files[0]
     if (droppedFile) {
       handleFileSelect(droppedFile)
@@ -233,12 +221,11 @@ export default function Home() {
   const handleTranscribe = async () => {
     if (!file) return
 
-    // Check WebSocket connection
     if (!socket || !isConnected) {
       toast({
         variant: 'destructive',
         title: 'Нет подключения',
-        description: 'Ожидание подключения к серверу... Попробуйте обновить страницу.',
+        description: 'Ожидание подключения к серверу...',
       })
       return
     }
@@ -248,14 +235,8 @@ export default function Home() {
     setError(null)
 
     try {
-      console.log('Converting file to base64:', file.name, file.size)
-      
-      // Convert file to base64 (browser-compatible)
       const base64Audio = await fileToBase64(file)
       
-      console.log('Sending to server, base64 length:', base64Audio.length)
-
-      // Send via WebSocket
       socket.emit('start-transcription', {
         fileName: file.name,
         fileSize: file.size,
@@ -278,7 +259,7 @@ export default function Home() {
       navigator.clipboard.writeText(result.text)
       toast({
         title: 'Скопировано',
-        description: 'Текст транскрипции скопирован в буфер обмена',
+        description: 'Текст транскрипции скопирован',
       })
     }
   }
@@ -352,13 +333,9 @@ export default function Home() {
           </CardHeader>
           <CardContent>
             <div
-              className={`
-                relative border-2 border-dashed rounded-xl p-8 text-center transition-all duration-300 cursor-pointer
-                ${isDragging 
-                  ? 'border-emerald-400 bg-emerald-500/10' 
-                  : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700/30'}
-                ${file ? 'border-emerald-500/50 bg-emerald-500/5' : ''}
-              `}
+              className={`relative border-2 border-dashed rounded-xl p-8 text-center transition-all duration-300 cursor-pointer
+                ${isDragging ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700/30'}
+                ${file ? 'border-emerald-500/50 bg-emerald-500/5' : ''}`}
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
@@ -373,13 +350,11 @@ export default function Home() {
               />
               
               {file ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-center gap-3">
-                    <FileAudio className="w-12 h-12 text-emerald-400" />
-                    <div className="text-left">
-                      <p className="text-white font-medium">{file.name}</p>
-                      <p className="text-slate-400 text-sm">{formatFileSize(file.size)}</p>
-                    </div>
+                <div className="flex items-center justify-center gap-3">
+                  <FileAudio className="w-12 h-12 text-emerald-400" />
+                  <div className="text-left">
+                    <p className="text-white font-medium">{file.name}</p>
+                    <p className="text-slate-400 text-sm">{formatFileSize(file.size)}</p>
                   </div>
                 </div>
               ) : (
@@ -397,7 +372,6 @@ export default function Home() {
               )}
             </div>
 
-            {/* Action Buttons */}
             <div className="flex gap-3 mt-4">
               <Button
                 onClick={handleTranscribe}
@@ -431,7 +405,7 @@ export default function Home() {
           </CardContent>
         </Card>
 
-        {/* Progress Section */}
+        {/* Progress */}
         {(status === 'uploading' || status === 'processing') && (
           <Card className="bg-slate-800/50 border-slate-700 backdrop-blur-sm mb-6">
             <CardContent className="pt-6">
@@ -440,10 +414,7 @@ export default function Home() {
                   <span className="text-slate-300 font-medium">Прогресс обработки</span>
                   <span className="text-emerald-400 font-bold">{progress}%</span>
                 </div>
-                <Progress 
-                  value={progress} 
-                  className="h-3 bg-slate-700 [&>div]:bg-gradient-to-r [&>div]:from-emerald-500 [&>div]:to-teal-500"
-                />
+                <Progress value={progress} className="h-3 bg-slate-700 [&>div]:bg-gradient-to-r [&>div]:from-emerald-500 [&>div]:to-teal-500" />
                 <div className="flex items-center gap-2 text-slate-400 text-sm">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span>
@@ -459,17 +430,15 @@ export default function Home() {
           </Card>
         )}
 
-        {/* Error Alert */}
+        {/* Error */}
         {status === 'error' && error && (
           <Alert className="bg-red-500/10 border-red-500/50 mb-6">
             <XCircle className="w-5 h-5 text-red-400" />
-            <AlertDescription className="text-red-300">
-              {error}
-            </AlertDescription>
+            <AlertDescription className="text-red-300">{error}</AlertDescription>
           </Alert>
         )}
 
-        {/* Results Section */}
+        {/* Results */}
         {status === 'completed' && result && (
           <Card className="bg-slate-800/50 border-slate-700 backdrop-blur-sm">
             <CardHeader>
@@ -479,39 +448,24 @@ export default function Home() {
                   Результат транскрипции
                 </CardTitle>
                 <div className="flex gap-2">
-                  <Button
-                    onClick={handleCopy}
-                    variant="outline"
-                    size="sm"
-                    className="border-slate-600 text-slate-300 hover:bg-slate-700"
-                  >
-                    <Copy className="w-4 h-4 mr-1" />
-                    Копировать
+                  <Button onClick={handleCopy} variant="outline" size="sm" className="border-slate-600 text-slate-300 hover:bg-slate-700">
+                    <Copy className="w-4 h-4 mr-1" /> Копировать
                   </Button>
-                  <Button
-                    onClick={handleDownload}
-                    variant="outline"
-                    size="sm"
-                    className="border-slate-600 text-slate-300 hover:bg-slate-700"
-                  >
-                    <Download className="w-4 h-4 mr-1" />
-                    Скачать
+                  <Button onClick={handleDownload} variant="outline" size="sm" className="border-slate-600 text-slate-300 hover:bg-slate-700">
+                    <Download className="w-4 h-4 mr-1" /> Скачать
                   </Button>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2 mt-2">
                 <Badge variant="secondary" className="bg-slate-700 text-slate-300">
-                  <FileText className="w-3 h-3 mr-1" />
-                  {result.wordCount} слов
+                  <FileText className="w-3 h-3 mr-1" /> {result.wordCount} слов
                 </Badge>
                 <Badge variant="secondary" className="bg-slate-700 text-slate-300">
-                  <FileAudio className="w-3 h-3 mr-1" />
-                  {formatFileSize(result.fileSize)}
+                  <FileAudio className="w-3 h-3 mr-1" /> {formatFileSize(result.fileSize)}
                 </Badge>
                 {result.processingTime && (
                   <Badge variant="secondary" className="bg-slate-700 text-slate-300">
-                    <Clock className="w-3 h-3 mr-1" />
-                    {formatTime(result.processingTime)}
+                    <Clock className="w-3 h-3 mr-1" /> {formatTime(result.processingTime)}
                   </Badge>
                 )}
                 {result.language && (
@@ -522,17 +476,12 @@ export default function Home() {
               </div>
             </CardHeader>
             <CardContent>
-              <Textarea
-                value={result.text}
-                readOnly
-                className="min-h-[200px] bg-slate-900/50 border-slate-600 text-white resize-y"
-                placeholder="Транскрипция появится здесь..."
-              />
+              <Textarea value={result.text} readOnly className="min-h-[200px] bg-slate-900/50 border-slate-600 text-white resize-y" />
             </CardContent>
           </Card>
         )}
 
-        {/* Features Section */}
+        {/* Features */}
         {status === 'idle' && !file && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-8">
             <Card className="bg-slate-800/30 border-slate-700/50">
@@ -541,39 +490,30 @@ export default function Home() {
                   <Mic className="w-6 h-6 text-emerald-400" />
                 </div>
                 <h3 className="text-white font-medium mb-2">OpenAI Whisper</h3>
-                <p className="text-slate-400 text-sm">
-                  Локальная модель без внешних API и токенов
-                </p>
+                <p className="text-slate-400 text-sm">Локальная модель без внешних API</p>
               </CardContent>
             </Card>
-            
             <Card className="bg-slate-800/30 border-slate-700/50">
               <CardContent className="pt-6 text-center">
                 <div className="p-3 bg-teal-500/20 rounded-full w-fit mx-auto mb-3">
                   <Clock className="w-6 h-6 text-teal-400" />
                 </div>
                 <h3 className="text-white font-medium mb-2">Прогресс в реальном времени</h3>
-                <p className="text-slate-400 text-sm">
-                  Отслеживайте статус обработки файла
-                </p>
+                <p className="text-slate-400 text-sm">Отслеживайте статус обработки</p>
               </CardContent>
             </Card>
-            
             <Card className="bg-slate-800/30 border-slate-700/50">
               <CardContent className="pt-6 text-center">
                 <div className="p-3 bg-cyan-500/20 rounded-full w-fit mx-auto mb-3">
                   <FileAudio className="w-6 h-6 text-cyan-400" />
                 </div>
                 <h3 className="text-white font-medium mb-2">До 100MB</h3>
-                <p className="text-slate-400 text-sm">
-                  Поддержка больших аудиофайлов
-                </p>
+                <p className="text-slate-400 text-sm">Поддержка больших аудиофайлов</p>
               </CardContent>
             </Card>
           </div>
         )}
 
-        {/* Footer */}
         <div className="text-center mt-12 text-slate-500 text-sm">
           <p>Powered by OpenAI Whisper</p>
         </div>
