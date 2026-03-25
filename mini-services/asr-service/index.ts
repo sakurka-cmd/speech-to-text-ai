@@ -1,6 +1,5 @@
 import { createServer } from 'http'
 import { Server } from 'socket.io'
-import ZAI from 'z-ai-web-dev-sdk'
 import { randomUUID } from 'crypto'
 
 const httpServer = createServer()
@@ -10,10 +9,13 @@ const io = new Server(httpServer, {
     origin: "*",
     methods: ["GET", "POST"]
   },
-  pingTimeout: 300000, // 5 minutes for long processing
+  pingTimeout: 300000,
   pingInterval: 25000,
-  maxHttpBufferSize: 100e6 // 100MB
+  maxHttpBufferSize: 100e6
 })
+
+// Whisper service URL
+const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || 'http://localhost:5000'
 
 interface TranscriptionJob {
   id: string
@@ -22,13 +24,15 @@ interface TranscriptionJob {
   fileName: string
   fileSize: number
   transcription?: string
+  language?: string
+  wordCount?: number
+  processingTime?: number
   error?: string
   startTime?: Date
   endTime?: Date
 }
 
 const jobs = new Map<string, TranscriptionJob>()
-let zaiInstance: Awaited<ReturnType<typeof ZAI.create>> | null = null
 
 // Progress simulation for better UX
 function simulateProgress(jobId: string, socket: any) {
@@ -42,14 +46,21 @@ function simulateProgress(jobId: string, socket: any) {
       return
     }
 
-    // Increment progress gradually, max 90% (remaining 10% for final processing)
-    if (currentJob.progress < 90) {
-      const increment = Math.random() * 5 + 2 // 2-7% increment
-      currentJob.progress = Math.min(90, currentJob.progress + increment)
+    // Increment progress gradually, max 85% (remaining for actual processing)
+    if (currentJob.progress < 85) {
+      const increment = Math.random() * 3 + 1
+      currentJob.progress = Math.min(85, currentJob.progress + increment)
+      
+      // Update status text
+      let statusText = 'Загрузка аудио...'
+      if (currentJob.progress >= 30) statusText = 'Анализ речи...'
+      if (currentJob.progress >= 60) statusText = 'Распознавание текста...'
+      if (currentJob.progress >= 80) statusText = 'Финальная обработка...'
+      
       socket.emit('progress', {
         jobId,
         progress: currentJob.progress,
-        status: 'processing'
+        status: statusText
       })
     }
   }, 500)
@@ -57,39 +68,78 @@ function simulateProgress(jobId: string, socket: any) {
   return interval
 }
 
-async function processAudio(jobId: string, base64Audio: string, fileName: string, fileSize: number, socket: any) {
+async function transcribeWithWhisper(
+  jobId: string, 
+  base64Audio: string, 
+  fileName: string, 
+  fileSize: number, 
+  socket: any
+) {
   const job = jobs.get(jobId)
   if (!job) return
 
   job.status = 'processing'
   job.startTime = new Date()
-
   const progressInterval = simulateProgress(jobId, socket)
 
   try {
-    if (!zaiInstance) {
-      zaiInstance = await ZAI.create()
+    // Convert base64 to buffer
+    const audioBuffer = Buffer.from(base64Audio, 'base64')
+    
+    // Get file extension
+    const ext = fileName.split('.').pop()?.toLowerCase() || 'wav'
+    
+    // Determine content type
+    const contentTypes: Record<string, string> = {
+      'wav': 'audio/wav',
+      'mp3': 'audio/mpeg',
+      'm4a': 'audio/m4a',
+      'flac': 'audio/flac',
+      'ogg': 'audio/ogg',
+      'webm': 'audio/webm'
     }
+    
+    const contentType = contentTypes[ext] || 'audio/wav'
 
-    const response = await zaiInstance.audio.asr.create({
-      file_base64: base64Audio
+    console.log(`Sending ${audioBuffer.length} bytes to Whisper service...`)
+
+    // Send to Whisper service
+    const formData = new FormData()
+    const blob = new Blob([audioBuffer], { type: contentType })
+    formData.append('file', blob, fileName)
+
+    const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
+      method: 'POST',
+      body: formData
     })
 
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new Error(errorData.detail || `Whisper service error: ${response.status}`)
+    }
+
+    const result = await response.json()
+    
     clearInterval(progressInterval)
 
     job.progress = 100
     job.status = 'completed'
-    job.transcription = response.text
+    job.transcription = result.text
+    job.language = result.language
+    job.wordCount = result.word_count
+    job.processingTime = result.processing_time
     job.endTime = new Date()
 
     socket.emit('completed', {
       jobId,
-      transcription: response.text,
-      wordCount: response.text.split(/\s+/).filter(w => w.length > 0).length,
-      processingTime: job.endTime.getTime() - job.startTime!.getTime()
+      transcription: result.text,
+      language: result.language,
+      wordCount: result.word_count,
+      processingTime: result.processing_time
     })
 
-    console.log(`Job ${jobId} completed successfully`)
+    console.log(`Job ${jobId} completed: ${result.word_count} words in ${result.processing_time.toFixed(2)}s`)
+
   } catch (error: any) {
     clearInterval(progressInterval)
     
@@ -119,7 +169,7 @@ io.on('connection', (socket) => {
     // Validate file size (max 100MB)
     if (fileSize > 100 * 1024 * 1024) {
       socket.emit('error', {
-        error: 'File too large. Maximum size is 100MB.'
+        error: 'Файл слишком большой. Максимальный размер: 100MB.'
       })
       return
     }
@@ -142,7 +192,7 @@ io.on('connection', (socket) => {
     })
 
     // Start processing
-    processAudio(jobId, base64Audio, fileName, fileSize, socket)
+    transcribeWithWhisper(jobId, base64Audio, fileName, fileSize, socket)
   })
 
   socket.on('get-job-status', (data: { jobId: string }) => {
@@ -153,11 +203,13 @@ io.on('connection', (socket) => {
         status: job.status,
         progress: job.progress,
         transcription: job.transcription,
+        wordCount: job.wordCount,
+        language: job.language,
         error: job.error
       })
     } else {
       socket.emit('error', {
-        error: 'Job not found'
+        error: 'Задача не найдена'
       })
     }
   })
@@ -173,7 +225,8 @@ io.on('connection', (socket) => {
 
 const PORT = 3003
 httpServer.listen(PORT, () => {
-  console.log(`ASR WebSocket service running on port ${PORT}`)
+  console.log(`ASR WebSocket proxy running on port ${PORT}`)
+  console.log(`Whisper service URL: ${WHISPER_SERVICE_URL}`)
 })
 
 // Graceful shutdown
