@@ -1,31 +1,79 @@
 services:
-  speech-to-text:
+  # Next.js Web Application
+  web:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: speech-to-text-ai
+    container_name: speech-to-text-web
     restart: unless-stopped
     ports:
-      - "3010:3000"   # Next.js web app
-      - "3013:3003"   # WebSocket ASR service
-    volumes:
-      - ../data/speech-to-text-ai/data:/app/data
-      - ../data/speech-to-text-ai/logs:/app/logs
-      # Монтируем конфиг Z.ai SDK
-      - ../data/speech-to-text-ai/.z-ai-config:/app/.z-ai-config:ro
+      - "3010:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - ASR_PORT=3003
-      - HOSTNAME=0.0.0.0
+      - WHISPER_SERVICE_URL=http://whisper:5000
+    depends_on:
+      whisper:
+        condition: service_healthy
+    networks:
+      - speech-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Node.js WebSocket Proxy
+  asr-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.asr-proxy
+    container_name: speech-to-text-asr
+    restart: unless-stopped
+    ports:
+      - "3013:3003"
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+      - WHISPER_SERVICE_URL=http://whisper:5000
+    depends_on:
+      whisper:
+        condition: service_healthy
+    networks:
+      - speech-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Python Whisper ASR Service
+  whisper:
+    build:
+      context: ./mini-services/whisper-service
+      dockerfile: Dockerfile
+    container_name: speech-to-text-whisper
+    restart: unless-stopped
+    ports:
+      - "5010:5000"
+    environment:
+      - WHISPER_MODEL=small
+      - WHISPER_DEVICE=cpu
+      - PORT=5000
+    volumes:
+      - whisper-models:/root/.cache/whisper
+    networks:
+      - speech-network
+    deploy:
+      resources:
+        reservations:
+          memory: 2G
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
-    networks:
-      - speech-to-text-network
+      start_period: 120s
     logging:
       driver: "json-file"
       options:
@@ -33,5 +81,8 @@ services:
         max-file: "3"
 
 networks:
-  speech-to-text-network:
+  speech-network:
     driver: bridge
+
+volumes:
+  whisper-models:

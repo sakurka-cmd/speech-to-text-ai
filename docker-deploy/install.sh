@@ -1,5 +1,5 @@
 #!/bin/bash
-# Установка Speech to Text AI на сервер
+# Установка Speech to Text AI с Whisper на сервер
 # Запуск: sudo ./install.sh
 
 set -e
@@ -16,8 +16,9 @@ COMPOSE_DIR="${DOCKER_BASE}/compose/${APP_NAME}"
 DATA_DIR="${DOCKER_BASE}/data/${APP_NAME}"
 
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}  Speech to Text AI - Установка${NC}"
+echo -e "${BLUE}  Speech to Text AI + Whisper${NC}"
 echo -e "${BLUE}========================================${NC}"
+echo ""
 
 # Проверка прав
 if [ "$EUID" -ne 0 ]; then
@@ -32,11 +33,14 @@ echo -e "${YELLOW}Проверка структуры Docker...${NC}"
 echo -e "${GREEN}✓ Структура Docker найдена${NC}"
 
 # Создание директорий
+echo ""
 echo -e "${YELLOW}Создание директорий...${NC}"
 mkdir -p "${COMPOSE_DIR}" "${DATA_DIR}"/{data,logs,uploads}
+chown -R 1001:1001 "${DATA_DIR}"
 echo -e "${GREEN}✓ Директории созданы${NC}"
 
 # Клонирование
+echo ""
 echo -e "${YELLOW}Клонирование репозитория...${NC}"
 cd "${COMPOSE_DIR}"
 if [ -d ".git" ]; then
@@ -46,94 +50,117 @@ else
 fi
 echo -e "${GREEN}✓ Репозиторий готов${NC}"
 
-# Проверка/создание конфига Z.ai
+# Выбор модели Whisper
 echo ""
-ZAI_CONFIG="${DATA_DIR}/.z-ai-config"
-if [ ! -f "${ZAI_CONFIG}" ]; then
-    echo -e "${YELLOW}Создание конфигурационного файла Z.ai...${NC}"
-    echo ""
-    echo -e "${BLUE}Для работы приложения необходим API ключ Z.ai${NC}"
-    echo -e "Получите ключ на: ${GREEN}https://z.ai${NC}"
-    echo ""
-    read -p "Введите baseUrl (например, https://api.z.ai/v1): " BASE_URL
-    read -p "Введите apiKey: " API_KEY
-    read -p "Введите chatId: " CHAT_ID
-    read -p "Введите token: " TOKEN
-    read -p "Введите userId: " USER_ID
-    
-    cat > "${ZAI_CONFIG}" << EOF
-{
-  "baseUrl": "${BASE_URL}",
-  "apiKey": "${API_KEY}",
-  "chatId": "${CHAT_ID}",
-  "token": "${TOKEN}",
-  "userId": "${USER_ID}"
-}
-EOF
-    echo -e "${GREEN}✓ Конфигурационный файл создан: ${ZAI_CONFIG}${NC}"
-else
-    echo -e "${GREEN}✓ Конфигурационный файл уже существует: ${ZAI_CONFIG}${NC}"
-fi
-
-# Права
-chown -R 1001:1001 "${DATA_DIR}"
-chmod 600 "${ZAI_CONFIG}"
-
-# Создание docker-start.sh
-cat > "${COMPOSE_DIR}/docker-start.sh" << 'EOF'
-#!/bin/sh
-set -e
-echo "Starting Speech to Text AI..."
-cd /app/mini-services/asr-service
-bun run index.ts &
-ASR_PID=$!
-cd /app
-sleep 2
-node server.js
-trap "kill $ASR_PID 2>/dev/null" EXIT
-EOF
-chmod +x "${COMPOSE_DIR}/docker-start.sh"
+echo -e "${YELLOW}Выбор модели Whisper...${NC}"
+echo ""
+echo "Доступные модели:"
+echo "  tiny   - Самая быстрая, низкое качество (~39MB)"
+echo "  base   - Быстрая, базовое качество (~74MB)"
+echo "  small  - Хорошее качество (~244MB) [рекомендуется]"
+echo "  medium - Высокое качество (~769MB)"
+echo "  large  - Максимальное качество (~1.5GB, требует GPU)"
+echo ""
+read -p "Выберите модель [tiny/base/small/medium/large] (по умолчанию small): " WHISPER_MODEL
+WHISPER_MODEL=${WHISPER_MODEL:-small}
+echo -e "${GREEN}✓ Выбрана модель: ${WHISPER_MODEL}${NC}"
 
 # Создание docker-compose.yml
-cat > "${COMPOSE_DIR}/docker-compose.yml" << 'EOF'
+echo ""
+echo -e "${YELLOW}Создание Docker файлов...${NC}"
+
+cat > "${COMPOSE_DIR}/docker-compose.yml" << EOF
 services:
-  speech-to-text:
+  # Next.js Web Application
+  web:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: speech-to-text-ai
+    container_name: speech-to-text-web
     restart: unless-stopped
     ports:
       - "3010:3000"
-      - "3013:3003"
-    volumes:
-      - ../data/speech-to-text-ai/data:/app/data
-      - ../data/speech-to-text-ai/logs:/app/logs
-      - ../data/speech-to-text-ai/.z-ai-config:/app/.z-ai-config:ro
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - ASR_PORT=3003
-      - HOSTNAME=0.0.0.0
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      - WHISPER_SERVICE_URL=http://whisper:5000
+    depends_on:
+      whisper:
+        condition: service_healthy
     networks:
-      - speech-to-text-network
+      - speech-network
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Node.js WebSocket Proxy
+  asr-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.asr-proxy
+    container_name: speech-to-text-asr
+    restart: unless-stopped
+    ports:
+      - "3013:3003"
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+      - WHISPER_SERVICE_URL=http://whisper:5000
+    depends_on:
+      whisper:
+        condition: service_healthy
+    networks:
+      - speech-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Python Whisper ASR Service
+  whisper:
+    build:
+      context: ./mini-services/whisper-service
+      dockerfile: Dockerfile
+    container_name: speech-to-text-whisper
+    restart: unless-stopped
+    ports:
+      - "5010:5000"
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL}
+      - WHISPER_DEVICE=cpu
+      - PORT=5000
+    volumes:
+      - whisper-models:/root/.cache/whisper
+    networks:
+      - speech-network
+    deploy:
+      resources:
+        reservations:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
-  speech-to-text-network:
+  speech-network:
     driver: bridge
+
+volumes:
+  whisper-models:
 EOF
 
-# Создание Dockerfile
+# Создание Dockerfile для Next.js
 cat > "${COMPOSE_DIR}/Dockerfile" << 'EOF'
 FROM node:20-alpine AS base
 FROM base AS deps
@@ -141,15 +168,12 @@ RUN apk add --no-cache libc6-compat
 WORKDIR /app
 RUN npm install -g bun
 COPY package.json bun.lock* ./
-COPY mini-services/asr-service/package.json ./mini-services/asr-service/
 RUN bun install --frozen-lockfile || bun install
-RUN cd mini-services/asr-service && bun install --frozen-lockfile || bun install
 
 FROM base AS builder
 WORKDIR /app
 RUN npm install -g bun
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/mini-services/asr-service/node_modules ./mini-services/asr-service/node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN bun run build
@@ -160,33 +184,56 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
-RUN npm install -g bun
 RUN apk add --no-cache wget
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/mini-services ./mini-services
-RUN mkdir -p /app/config /app/data/uploads && chown -R nextjs:nodejs /app/data /app/config
-COPY docker-start.sh /app/docker-start.sh
-RUN chmod +x /app/docker-start.sh
+RUN mkdir -p /app/data && chown -R nextjs:nodejs /app/data
 USER nextjs
-EXPOSE 3000 3003
+EXPOSE 3000
 ENV PORT=3000
-ENV ASR_PORT=3003
 ENV HOSTNAME="0.0.0.0"
-CMD ["/app/docker-start.sh"]
+CMD ["node", "server.js"]
+EOF
+
+# Создание Dockerfile для ASR Proxy
+cat > "${COMPOSE_DIR}/Dockerfile.asr-proxy" << 'EOF'
+FROM node:20-alpine
+WORKDIR /app
+RUN npm install -g bun
+COPY mini-services/asr-service/package.json ./
+RUN bun install
+COPY mini-services/asr-service/index.ts ./
+ENV NODE_ENV=production
+ENV PORT=3003
+EXPOSE 3003
+CMD ["bun", "run", "index.ts"]
 EOF
 
 echo -e "${GREEN}✓ Docker файлы созданы${NC}"
 
-# Сборка и запуск
-echo -e "${YELLOW}Сборка Docker образа...${NC}"
-docker compose build
+# Сборка
+echo ""
+echo -e "${YELLOW}Сборка Docker образов...${NC}"
+echo -e "${BLUE}Это может занять несколько минут (первый запуск загрузит модель Whisper)...${NC}"
 
-echo -e "${YELLOW}Запуск контейнера...${NC}"
+docker compose build || {
+    echo -e "${RED}Ошибка сборки!${NC}"
+    exit 1
+}
+
+echo -e "${GREEN}✓ Docker образы собраны${NC}"
+
+# Запуск
+echo ""
+echo -e "${YELLOW}Запуск контейнеров...${NC}"
 docker compose up -d
 
-sleep 5
+echo ""
+echo -e "${YELLOW}Ожидание запуска Whisper (модель загружается)...${NC}"
+sleep 10
+
+# Статус
 docker compose ps
 
 echo ""
@@ -194,13 +241,19 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Установка завершена!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo -e "🌐 Web интерфейс:  http://<IP-сервера>:3010"
-echo -e "🔌 WebSocket:      ws://<IP-сервера>:3013"
+echo -e "🌐 Web интерфейс:     http://<IP-сервера>:3010"
+echo -e "🔌 WebSocket:         ws://<IP-сервера>:3013"
+echo -e "🎤 Whisper API:       http://<IP-сервера>:5010"
 echo ""
-echo -e "📁 Конфиг Z.ai:    ${ZAI_CONFIG}"
+echo -e "📊 Модель Whisper:    ${WHISPER_MODEL}"
 echo ""
 echo -e "Управление:"
 echo -e "  cd ${COMPOSE_DIR}"
-echo -e "  docker compose up -d     # Запуск"
-echo -e "  docker compose down      # Остановка"
-echo -e "  docker compose logs -f   # Логи"
+echo -e "  docker compose up -d        # Запуск"
+echo -e "  docker compose down         # Остановка"
+echo -e "  docker compose logs -f      # Логи всех сервисов"
+echo -e "  docker compose logs -f whisper  # Логи Whisper"
+echo ""
+echo -e "${YELLOW}Важно: При первом запуске модель Whisper загружается автоматически.${NC}"
+echo -e "${YELLOW}Это может занять 1-2 минуты. Проверьте статус:${NC}"
+echo -e "  docker compose logs -f whisper"
