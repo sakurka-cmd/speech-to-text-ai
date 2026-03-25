@@ -4,14 +4,16 @@ import { randomUUID } from 'crypto'
 
 const httpServer = createServer()
 const io = new Server(httpServer, {
-  path: '/',
+  path: '/socket.io',
   cors: {
     origin: "*",
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST"],
+    credentials: false
   },
   pingTimeout: 300000,
   pingInterval: 25000,
-  maxHttpBufferSize: 100e6
+  maxHttpBufferSize: 100e6,
+  transports: ['websocket', 'polling']
 })
 
 // Whisper service URL
@@ -46,12 +48,10 @@ function simulateProgress(jobId: string, socket: any) {
       return
     }
 
-    // Increment progress gradually, max 85% (remaining for actual processing)
     if (currentJob.progress < 85) {
       const increment = Math.random() * 3 + 1
       currentJob.progress = Math.min(85, currentJob.progress + increment)
       
-      // Update status text
       let statusText = 'Загрузка аудио...'
       if (currentJob.progress >= 30) statusText = 'Анализ речи...'
       if (currentJob.progress >= 60) statusText = 'Распознавание текста...'
@@ -83,27 +83,26 @@ async function transcribeWithWhisper(
   const progressInterval = simulateProgress(jobId, socket)
 
   try {
-    // Convert base64 to buffer
     const audioBuffer = Buffer.from(base64Audio, 'base64')
-    
-    // Get file extension
     const ext = fileName.split('.').pop()?.toLowerCase() || 'wav'
     
-    // Determine content type
     const contentTypes: Record<string, string> = {
       'wav': 'audio/wav',
       'mp3': 'audio/mpeg',
       'm4a': 'audio/m4a',
       'flac': 'audio/flac',
       'ogg': 'audio/ogg',
-      'webm': 'audio/webm'
+      'webm': 'audio/webm',
+      'mp4': 'audio/mp4',
+      'mpeg': 'audio/mpeg',
+      'mpga': 'audio/mpeg',
+      'oga': 'audio/ogg'
     }
     
     const contentType = contentTypes[ext] || 'audio/wav'
 
     console.log(`Sending ${audioBuffer.length} bytes to Whisper service...`)
 
-    // Send to Whisper service
     const formData = new FormData()
     const blob = new Blob([audioBuffer], { type: contentType })
     formData.append('file', blob, fileName)
@@ -165,8 +164,8 @@ io.on('connection', (socket) => {
     base64Audio: string 
   }) => {
     const { fileName, fileSize, base64Audio } = data
+    console.log(`Received transcription request: ${fileName}, ${fileSize} bytes`)
 
-    // Validate file size (max 100MB)
     if (fileSize > 100 * 1024 * 1024) {
       socket.emit('error', {
         error: 'Файл слишком большой. Максимальный размер: 100MB.'
@@ -174,7 +173,6 @@ io.on('connection', (socket) => {
       return
     }
 
-    // Create job
     const jobId = randomUUID()
     const job: TranscriptionJob = {
       id: jobId,
@@ -191,7 +189,6 @@ io.on('connection', (socket) => {
       fileSize
     })
 
-    // Start processing
     transcribeWithWhisper(jobId, base64Audio, fileName, fileSize, socket)
   })
 
@@ -214,8 +211,8 @@ io.on('connection', (socket) => {
     }
   })
 
-  socket.on('disconnect', () => {
-    console.log(`Client disconnected: ${socket.id}`)
+  socket.on('disconnect', (reason) => {
+    console.log(`Client disconnected: ${socket.id}, reason: ${reason}`)
   })
 
   socket.on('error', (error) => {
@@ -229,7 +226,6 @@ httpServer.listen(PORT, () => {
   console.log(`Whisper service URL: ${WHISPER_SERVICE_URL}`)
 })
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('Received SIGTERM signal, shutting down server...')
   httpServer.close(() => {

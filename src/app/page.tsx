@@ -68,46 +68,61 @@ export default function Home() {
 
   // Initialize WebSocket connection
   useEffect(() => {
-    // Determine WebSocket URL based on environment
-    const wsUrl = typeof window !== 'undefined' 
-      ? `${window.location.protocol}//${window.location.hostname}:3013`
-      : 'http://localhost:3013'
-
+    // Get WebSocket URL - use same host but port 3013
+    const hostname = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
+    const protocol = typeof window !== 'undefined' ? window.location.protocol : 'http:'
+    const wsUrl = `${protocol}//${hostname}:3013`
+    
     console.log('Connecting to WebSocket:', wsUrl)
 
     const newSocket = io(wsUrl, {
-      path: '/',
+      path: '/socket.io',
+      transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
       timeout: 10000,
+      withCredentials: false,
     })
 
     newSocket.on('connect', () => {
-      console.log('Connected to ASR service')
+      console.log('Connected to ASR service, socket id:', newSocket.id)
       setIsConnected(true)
+      setStatus('idle')
     })
 
-    newSocket.on('disconnect', () => {
-      console.log('Disconnected from ASR service')
+    newSocket.on('disconnect', (reason) => {
+      console.log('Disconnected from ASR service:', reason)
       setIsConnected(false)
     })
 
     newSocket.on('connect_error', (err) => {
-      console.error('WebSocket connection error:', err)
+      console.error('WebSocket connection error:', err.message)
       setIsConnected(false)
     })
 
+    newSocket.on('reconnect', (attemptNumber) => {
+      console.log('Reconnected after', attemptNumber, 'attempts')
+      setIsConnected(true)
+    })
+
+    newSocket.on('reconnect_error', (err) => {
+      console.error('Reconnection error:', err.message)
+    })
+
     newSocket.on('job-created', (data) => {
+      console.log('Job created:', data)
       setStatus('processing')
       setProgress(5)
     })
 
     newSocket.on('progress', (data) => {
+      console.log('Progress:', data.progress)
       setProgress(Math.round(data.progress))
     })
 
     newSocket.on('completed', (data) => {
+      console.log('Completed:', data)
       setProgress(100)
       setStatus('completed')
       setResult({
@@ -125,6 +140,7 @@ export default function Home() {
     })
 
     newSocket.on('error', (data) => {
+      console.error('Server error:', data)
       setStatus('error')
       setError(data.error)
       toast({
@@ -137,6 +153,7 @@ export default function Home() {
     setSocket(newSocket)
 
     return () => {
+      console.log('Cleaning up socket connection')
       newSocket.close()
     }
   }, [toast])
@@ -221,7 +238,7 @@ export default function Home() {
       toast({
         variant: 'destructive',
         title: 'Нет подключения',
-        description: 'Ожидание подключения к серверу...',
+        description: 'Ожидание подключения к серверу... Попробуйте обновить страницу.',
       })
       return
     }
@@ -231,8 +248,12 @@ export default function Home() {
     setError(null)
 
     try {
+      console.log('Converting file to base64:', file.name, file.size)
+      
       // Convert file to base64 (browser-compatible)
       const base64Audio = await fileToBase64(file)
+      
+      console.log('Sending to server, base64 length:', base64Audio.length)
 
       // Send via WebSocket
       socket.emit('start-transcription', {
