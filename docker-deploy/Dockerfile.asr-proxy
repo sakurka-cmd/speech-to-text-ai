@@ -3,17 +3,18 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install bun
-RUN npm install -g bun
-
 # Copy package files
 COPY mini-services/asr-service/package.json ./
+COPY mini-services/asr-service/tsconfig.json ./
 
 # Install dependencies
-RUN bun install
+RUN npm install
 
 # Copy source
 COPY mini-services/asr-service/index.ts ./
+
+# Build TypeScript
+RUN npx tsc
 
 # Environment
 ENV NODE_ENV=production
@@ -22,4 +23,4 @@ ENV PORT=3003
 EXPOSE 3003
 
 # Run
-CMD ["bun", "run", "index.ts"]
+CMD ["node", "dist/index.js"]

@@ -1,6 +1,7 @@
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import { randomUUID } from 'crypto'
+import { request } from 'http'
 
 const httpServer = createServer()
 const io = new Server(httpServer, {
@@ -17,6 +18,9 @@ const io = new Server(httpServer, {
 
 const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || 'http://localhost:5000'
 const WHISPER_TIMEOUT = parseInt(process.env.WHISPER_TIMEOUT || '7200000', 10) // 2 hours default
+
+// Parse WHISPER_SERVICE_URL
+const whisperUrl = new URL(WHISPER_SERVICE_URL)
 
 interface UploadSession {
   id: string
@@ -98,22 +102,71 @@ async function transcribeWithWhisper(
     console.log(`[${jobId}] Sending ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB to Whisper...`)
     console.log(`[${jobId}] Timeout set to ${WHISPER_TIMEOUT / 1000 / 60} minutes`)
 
-    const formData = new FormData()
-    formData.append('file', new Blob([audioBuffer], { type: contentType }), fileName)
+    // Build multipart form data manually
+    const boundary = '----FormBoundary' + randomUUID().replace(/-/g, '')
+    const parts: Buffer[] = []
+    
+    // File part
+    const header = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${contentType}\r\n\r\n`
+    parts.push(Buffer.from(header, 'utf8'))
+    parts.push(audioBuffer)
+    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'))
+    
+    const body = Buffer.concat(parts)
+    
+    // Use native HTTP request with explicit timeout
+    const result = await new Promise<any>((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(new Error(`Timeout after ${WHISPER_TIMEOUT / 1000 / 60} minutes`))
+      }, WHISPER_TIMEOUT)
 
-    // Use AbortSignal.timeout for proper timeout handling
-    const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
-      method: 'POST',
-      body: formData,
-      signal: AbortSignal.timeout(WHISPER_TIMEOUT)
+      const req = request({
+        hostname: whisperUrl.hostname,
+        port: whisperUrl.port || 5000,
+        path: '/transcribe',
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length
+        },
+        timeout: WHISPER_TIMEOUT
+      }, (res) => {
+        let data = ''
+        res.on('data', chunk => data += chunk)
+        res.on('end', () => {
+          clearTimeout(timeoutId)
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              resolve(JSON.parse(data))
+            } catch (e) {
+              reject(new Error('Invalid JSON response'))
+            }
+          } else {
+            try {
+              const err = JSON.parse(data)
+              reject(new Error(err.detail || `HTTP ${res.statusCode}`))
+            } catch {
+              reject(new Error(`HTTP ${res.statusCode}`))
+            }
+          }
+        })
+      })
+
+      req.on('error', (err) => {
+        clearTimeout(timeoutId)
+        reject(err)
+      })
+
+      req.on('timeout', () => {
+        clearTimeout(timeoutId)
+        req.destroy()
+        reject(new Error('Connection timeout'))
+      })
+
+      req.write(body)
+      req.end()
     })
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}))
-      throw new Error(errorData.detail || `HTTP ${response.status}`)
-    }
-
-    const result = await response.json()
     clearInterval(progressInterval)
 
     const totalTime = (Date.now() - startTime) / 1000
