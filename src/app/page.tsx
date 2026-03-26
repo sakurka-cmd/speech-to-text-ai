@@ -609,37 +609,42 @@ export default function Home() {
 
               {/* Selection actions */}
               {selectedRegion && selectedRegion.end - selectedRegion.start > 0.5 && (
-                <div className="flex flex-wrap gap-3 pt-4 border-t border-slate-700">
-                  <Button
-                    onClick={() => handleTranscribe(true)}
-                    disabled={status === 'processing' || status === 'uploading' || isEncoding || !isConnected}
-                    className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:opacity-50"
-                  >
-                    {isEncoding ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Кодирование...
-                      </>
-                    ) : (
-                      <>
-                        <Mic className="w-4 h-4 mr-2" />
-                        Распознать выбранный участок
-                      </>
-                    )}
-                  </Button>
+                <div className="space-y-4 pt-4 border-t border-slate-700">
+                  {/* Encoding indicator */}
+                  {isEncoding && (
+                    <div className="flex items-center justify-center gap-3 p-4 bg-blue-500/10 rounded-lg border border-blue-500/30">
+                      <Loader2 className="w-5 h-5 animate-spin text-blue-400" />
+                      <span className="text-blue-300">Подготовка MP3...</span>
+                    </div>
+                  )}
                   
-                  <Button
-                    onClick={handleDownloadSelection}
-                    disabled={isEncoding}
-                    className="bg-purple-500 hover:bg-purple-600"
-                  >
-                    {isEncoding ? (
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    ) : (
+                  {/* MP3 not ready indicator */}
+                  {!mp3Ready && !isEncoding && (
+                    <div className="flex items-center justify-center gap-3 p-3 bg-yellow-500/10 rounded-lg border border-yellow-500/30">
+                      <Loader2 className="w-4 h-4 animate-spin text-yellow-400" />
+                      <span className="text-yellow-300 text-sm">Загрузка MP3 кодировщика...</span>
+                    </div>
+                  )}
+                  
+                  <div className="flex flex-wrap gap-3">
+                    <Button
+                      onClick={() => handleTranscribe(true)}
+                      disabled={status === 'processing' || status === 'uploading' || isEncoding || !isConnected || !mp3Ready}
+                      className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:opacity-50"
+                    >
+                      <Mic className="w-4 h-4 mr-2" />
+                      Распознать выбранный участок
+                    </Button>
+                    
+                    <Button
+                      onClick={handleDownloadSelection}
+                      disabled={isEncoding || !mp3Ready}
+                      className="bg-purple-500 hover:bg-purple-600"
+                    >
                       <Scissors className="w-4 h-4 mr-2" />
-                    )}
-                    Вырезать в MP3
-                  </Button>
+                      Вырезать в MP3
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>
