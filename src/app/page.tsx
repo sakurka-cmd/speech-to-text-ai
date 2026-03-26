@@ -61,6 +61,7 @@ export default function Home() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [selectedRegion, setSelectedRegion] = useState<{start: number, end: number} | null>(null)
   const [isEncoding, setIsEncoding] = useState(false)
+  const [isLoadingAudio, setIsLoadingAudio] = useState(false)
   const audioContextRef = useRef<AudioContext | null>(null)
 
   // Timer for processing
@@ -178,7 +179,7 @@ export default function Home() {
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
+    const secs = seconds % 60
     if (mins > 0) return `${mins}м ${secs}с`
     return `${secs}с`
   }
@@ -191,6 +192,7 @@ export default function Home() {
 
   // Load audio file and decode
   const loadAudioFile = async (file: File) => {
+    setIsLoadingAudio(true)
     try {
       // Create object URL for audio element
       const url = URL.createObjectURL(file)
@@ -211,6 +213,8 @@ export default function Home() {
         title: 'Ошибка загрузки аудио',
         description: 'Не удалось загрузить аудиофайл для редактирования',
       })
+    } finally {
+      setIsLoadingAudio(false)
     }
   }
 
@@ -239,6 +243,8 @@ export default function Home() {
     setUploadProgress(0)
     setProcessingTime(0)
     setSelectedRegion(null)
+    setAudioBuffer(null)
+    setAudioUrl(null)
     
     // Load audio for waveform editor
     await loadAudioFile(selectedFile)
@@ -269,7 +275,7 @@ export default function Home() {
     if (useSelection && selectedRegion && audioBuffer) {
       setIsEncoding(true)
       try {
-        const encodedBlob = await encodeSelectedRegion()
+        const encodedBlob = await encodeSelectedRegionToMp3()
         if (encodedBlob) {
           fileToTranscribe = encodedBlob
         } else {
@@ -344,110 +350,116 @@ export default function Home() {
     }
   }
 
-  // Encode selected region to MP3/WAV
-  const encodeSelectedRegion = async (): Promise<Blob | null> => {
-    if (!audioBuffer || !selectedRegion) return null
+  // Extract selected region from AudioBuffer
+  const extractSelectedRegion = (buffer: AudioBuffer): AudioBuffer => {
+    if (!selectedRegion) return buffer
 
-    const startSample = Math.floor(selectedRegion.start * audioBuffer.sampleRate)
-    const endSample = Math.floor(selectedRegion.end * audioBuffer.sampleRate)
+    const startSample = Math.floor(selectedRegion.start * buffer.sampleRate)
+    const endSample = Math.floor(selectedRegion.end * buffer.sampleRate)
     const length = endSample - startSample
 
-    // Create a new buffer for the selected region
     const newBuffer = new AudioContext().createBuffer(
-      audioBuffer.numberOfChannels,
+      buffer.numberOfChannels,
       length,
-      audioBuffer.sampleRate
+      buffer.sampleRate
     )
 
-    for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
-      const sourceData = audioBuffer.getChannelData(channel)
+    for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+      const sourceData = buffer.getChannelData(channel)
       const destData = newBuffer.getChannelData(channel)
       for (let i = 0; i < length; i++) {
         destData[i] = sourceData[startSample + i]
       }
     }
 
-    // Try MP3 first, fallback to WAV
-    return encodeToWav(newBuffer)
+    return newBuffer
   }
 
-  // Encode AudioBuffer to WAV
-  const encodeToWav = (buffer: AudioBuffer): Blob => {
+  // Encode selected region to MP3 using lamejs
+  const encodeSelectedRegionToMp3 = async (): Promise<Blob | null> => {
+    if (!audioBuffer || !selectedRegion) return null
+
+    const regionBuffer = extractSelectedRegion(audioBuffer)
+    return encodeToMp3(regionBuffer)
+  }
+
+  // Encode AudioBuffer to MP3 using lamejs
+  const encodeToMp3 = async (buffer: AudioBuffer): Promise<Blob> => {
+    // Dynamic import of lamejs
+    const lamejs = (await import('lamejs')).default
+    
     const numChannels = buffer.numberOfChannels
     const sampleRate = buffer.sampleRate
-    const format = 1 // PCM
-    const bitDepth = 16
+    const kbps = 128
 
-    const bytesPerSample = bitDepth / 8
-    const blockAlign = numChannels * bytesPerSample
-    const byteRate = sampleRate * blockAlign
-    const dataSize = buffer.length * blockAlign
-    const headerSize = 44
-    const totalSize = headerSize + dataSize
+    // Get channel data
+    const left = buffer.getChannelData(0)
+    const right = numChannels > 1 ? buffer.getChannelData(1) : left
 
-    const arrayBuffer = new ArrayBuffer(totalSize)
-    const view = new DataView(arrayBuffer)
-
-    // RIFF header
-    writeString(view, 0, 'RIFF')
-    view.setUint32(4, totalSize - 8, true)
-    writeString(view, 8, 'WAVE')
-
-    // fmt chunk
-    writeString(view, 12, 'fmt ')
-    view.setUint32(16, 16, true)
-    view.setUint16(20, format, true)
-    view.setUint16(22, numChannels, true)
-    view.setUint32(24, sampleRate, true)
-    view.setUint32(28, byteRate, true)
-    view.setUint16(32, blockAlign, true)
-    view.setUint16(34, bitDepth, true)
-
-    // data chunk
-    writeString(view, 36, 'data')
-    view.setUint32(40, dataSize, true)
-
-    // Write samples
-    const channels = []
-    for (let i = 0; i < numChannels; i++) {
-      channels.push(buffer.getChannelData(i))
+    // Convert to Int16
+    const leftInt = new Int16Array(left.length)
+    const rightInt = new Int16Array(right.length)
+    
+    for (let i = 0; i < left.length; i++) {
+      leftInt[i] = Math.max(-32768, Math.min(32767, Math.floor(left[i] * 32767)))
+      rightInt[i] = Math.max(-32768, Math.min(32767, Math.floor(right[i] * 32767)))
     }
 
-    let offset = 44
-    for (let i = 0; i < buffer.length; i++) {
-      for (let channel = 0; channel < numChannels; channel++) {
-        const sample = Math.max(-1, Math.min(1, channels[channel][i]))
-        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF
-        view.setInt16(offset, intSample, true)
-        offset += 2
+    // Create MP3 encoder
+    const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, kbps)
+    const mp3Data: Int8Array[] = []
+
+    // Encode in chunks of 1152 samples
+    const blockSize = 1152
+    for (let i = 0; i < leftInt.length; i += blockSize) {
+      const leftChunk = leftInt.subarray(i, i + blockSize)
+      const rightChunk = rightInt.subarray(i, i + blockSize)
+      
+      let mp3buf: Int8Array
+      if (numChannels > 1) {
+        mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk)
+      } else {
+        mp3buf = mp3encoder.encodeBuffer(leftChunk)
+      }
+      
+      if (mp3buf.length > 0) {
+        mp3Data.push(mp3buf)
       }
     }
 
-    return new Blob([arrayBuffer], { type: 'audio/wav' })
-  }
-
-  const writeString = (view: DataView, offset: number, str: string) => {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i))
+    // Flush remaining
+    const remaining = mp3encoder.flush()
+    if (remaining.length > 0) {
+      mp3Data.push(remaining)
     }
+
+    // Combine all MP3 data
+    const totalLength = mp3Data.reduce((acc, arr) => acc + arr.length, 0)
+    const mp3Combined = new Uint8Array(totalLength)
+    let offset = 0
+    for (const chunk of mp3Data) {
+      mp3Combined.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.length), offset)
+      offset += chunk.length
+    }
+
+    return new Blob([mp3Combined], { type: 'audio/mp3' })
   }
 
-  // Download selected region
+  // Download selected region as MP3
   const handleDownloadSelection = async () => {
     if (!selectedRegion || !audioBuffer) return
     
     setIsEncoding(true)
     try {
-      const blob = await encodeSelectedRegion()
+      const blob = await encodeSelectedRegionToMp3()
       if (blob) {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        const ext = blob.type === 'audio/mp3' ? 'mp3' : 'wav'
-        a.download = `audio_selection_${formatTimeShort(selectedRegion.start)}-${formatTimeShort(selectedRegion.end)}.${ext}`
+        a.download = `audio_${formatTimeShort(selectedRegion.start)}-${formatTimeShort(selectedRegion.end)}.mp3`
         a.click()
         URL.revokeObjectURL(url)
-        toast({ title: 'Файл сохранён', description: `Выбранный фрагмент сохранён как ${a.download}` })
+        toast({ title: 'Файл сохранён', description: `Выбранный фрагмент сохранён как MP3` })
       }
     } catch (err) {
       console.error('Download error:', err)
@@ -557,7 +569,7 @@ export default function Home() {
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => !isLoadingAudio && fileInputRef.current?.click()}
             >
               <input
                 ref={fileInputRef}
@@ -567,7 +579,13 @@ export default function Home() {
                 onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
               />
               
-              {file ? (
+              {isLoadingAudio ? (
+                <div className="space-y-3">
+                  <Loader2 className="w-12 h-12 text-emerald-400 mx-auto animate-spin" />
+                  <p className="text-white font-medium">Загрузка аудио...</p>
+                  <p className="text-slate-400 text-sm">Подготовка визуализации</p>
+                </div>
+              ) : file ? (
                 <div className="flex items-center justify-center gap-3">
                   <FileAudio className="w-12 h-12 text-emerald-400" />
                   <div className="text-left">
@@ -587,7 +605,7 @@ export default function Home() {
             <div className="flex gap-3 mt-4">
               <Button
                 onClick={() => handleTranscribe(false)}
-                disabled={!file || status === 'processing' || status === 'uploading' || !isConnected}
+                disabled={!file || status === 'processing' || status === 'uploading' || !isConnected || isLoadingAudio}
                 className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
               >
                 {status === 'uploading' || status === 'processing' ? (
@@ -618,7 +636,7 @@ export default function Home() {
         </Card>
 
         {/* Waveform Editor */}
-        {audioBuffer && audioUrl && (
+        {audioBuffer && audioUrl && !isLoadingAudio && (
           <Card className="bg-slate-800/50 border-slate-700 mb-6">
             <CardHeader>
               <CardTitle className="text-white flex items-center gap-2">
@@ -660,15 +678,14 @@ export default function Home() {
                   <Button
                     onClick={handleDownloadSelection}
                     disabled={isEncoding}
-                    variant="outline"
-                    className="border-blue-500 text-blue-400 hover:bg-blue-500/10"
+                    className="bg-purple-500 hover:bg-purple-600"
                   >
                     {isEncoding ? (
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                     ) : (
                       <Scissors className="w-4 h-4 mr-2" />
                     )}
-                    Вырезать в WAV
+                    Вырезать в MP3
                   </Button>
                 </div>
               )}
