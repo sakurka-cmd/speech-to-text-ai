@@ -458,13 +458,13 @@ export default function Home() {
         )}
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-2 bg-slate-800/50">
-            <TabsTrigger value="upload" className="data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400">
+          <TabsList className="grid w-full grid-cols-2 bg-slate-700/50">
+            <TabsTrigger value="upload" className="text-slate-300 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400 data-[state=inactive]:hover:text-white data-[state=inactive]:hover:bg-slate-600/50">
               <Upload className="w-4 h-4 mr-2" />
               Загрузка
               {audioLoaded && <CheckCircle className="w-4 h-4 ml-2 text-emerald-400" />}
             </TabsTrigger>
-            <TabsTrigger value="editor" disabled={!audioLoaded} className="data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400">
+            <TabsTrigger value="editor" disabled={!audioLoaded} className="text-slate-300 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400 data-[state=inactive]:hover:text-white data-[state=inactive]:hover:bg-slate-600/50 disabled:text-slate-500 disabled:opacity-60">
               <Scissors className="w-4 h-4 mr-2" />
               Редактор
             </TabsTrigger>
