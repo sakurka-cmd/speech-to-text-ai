@@ -197,8 +197,10 @@ CMD ["node", "server.js"]
 EOF
 
 # Создание Dockerfile для ASR Proxy
-# Копируем из docker-deploy директории в корень
-cp "${COMPOSE_DIR}/docker-deploy/Dockerfile.asr-proxy" "${COMPOSE_DIR}/Dockerfile.asr-proxy" 2>/dev/null || {
+# Копируем из корня репозитория (Dockerfile.asr-proxy уже там)
+if [ -f "${COMPOSE_DIR}/Dockerfile.asr-proxy" ]; then
+    echo -e "${GREEN}✓ Dockerfile.asr-proxy найден в репозитории${NC}"
+else
     # Fallback если файл не найден - создаём с Node.js вместо bun
     cat > "${COMPOSE_DIR}/Dockerfile.asr-proxy" << 'DOCKERFILE'
 FROM node:20-alpine
@@ -210,10 +212,12 @@ COPY mini-services/asr-service/index.ts ./
 RUN npx tsc
 ENV NODE_ENV=production
 ENV PORT=3003
+ENV WHISPER_TIMEOUT=7200000
 EXPOSE 3003
 CMD ["node", "dist/index.js"]
 DOCKERFILE
-}
+    echo -e "${YELLOW}✓ Dockerfile.asr-proxy создан (fallback)${NC}"
+fi
 
 echo -e "${GREEN}✓ Docker файлы созданы${NC}"
 
