@@ -1,0 +1,27 @@
+# Node.js ASR WebSocket Proxy - Uses Node.js for proper timeout support
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY mini-services/asr-service/package.json ./
+COPY mini-services/asr-service/tsconfig.json ./
+
+# Install dependencies with npm (not bun - bun has timeout issues)
+RUN npm install
+
+# Copy source
+COPY mini-services/asr-service/index.ts ./
+
+# Build TypeScript
+RUN npx tsc
+
+# Environment
+ENV NODE_ENV=production
+ENV PORT=3003
+ENV WHISPER_TIMEOUT=7200000
+
+EXPOSE 3003
+
+# Run
+CMD ["node", "dist/index.js"]
