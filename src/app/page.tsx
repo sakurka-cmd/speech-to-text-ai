@@ -29,6 +29,9 @@ import {
 import { useToast } from '@/hooks/use-toast'
 import WaveformEditor from '@/components/audio/WaveformEditor'
 
+// @ts-ignore
+import lamejs from 'lamejs'
+
 const CHUNK_SIZE = 1024 * 1024 // 1MB chunks
 
 interface TranscriptionResult {
@@ -56,6 +59,7 @@ export default function Home() {
   const [audioLoaded, setAudioLoaded] = useState(false)
   const [audioLoading, setAudioLoading] = useState(false)
   const [audioDuration, setAudioDuration] = useState(0)
+  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null)
   const [result, setResult] = useState<TranscriptionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
@@ -202,7 +206,7 @@ export default function Home() {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
-  const handleFileSelect = useCallback((selectedFile: File) => {
+  const handleFileSelect = useCallback(async (selectedFile: File) => {
     const validExtensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.webm', '.mp4', '.mpeg', '.mpga', '.oga']
     const ext = '.' + selectedFile.name.split('.').pop()?.toLowerCase()
     const isValidType = selectedFile.type.startsWith('audio/') ||
@@ -236,23 +240,37 @@ export default function Home() {
     setProcessingTime(0)
     setTrimmedBlob(null)
     setSelectedRegion(null)
+    setAudioBuffer(null)
 
-    // Create object URL and get duration
+    // Create object URL
     const url = URL.createObjectURL(selectedFile)
     setAudioUrl(url)
 
-    // Get audio duration
-    const audio = new Audio()
-    audio.onloadedmetadata = () => {
-      setAudioDuration(audio.duration)
+    // Decode audio for trimming
+    try {
+      const arrayBuffer = await selectedFile.arrayBuffer()
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const decodedBuffer = await audioContext.decodeAudioData(arrayBuffer)
+      setAudioBuffer(decodedBuffer)
+      setAudioDuration(decodedBuffer.duration)
+      setSelectedRegion({ start: 0, end: decodedBuffer.duration })
       setAudioLoaded(true)
       setAudioLoading(false)
+    } catch (err) {
+      console.error('Error decoding audio:', err)
+      // Still allow playback even if decode fails
+      const audio = new Audio()
+      audio.onloadedmetadata = () => {
+        setAudioDuration(audio.duration)
+        setAudioLoaded(true)
+        setAudioLoading(false)
+      }
+      audio.onerror = () => {
+        setAudioLoading(false)
+        toast({ variant: 'destructive', title: 'Ошибка загрузки аудио' })
+      }
+      audio.src = url
     }
-    audio.onerror = () => {
-      setAudioLoading(false)
-      toast({ variant: 'destructive', title: 'Ошибка загрузки аудио' })
-    }
-    audio.src = url
   }, [audioUrl, toast])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -280,30 +298,86 @@ export default function Home() {
     const baseName = file?.name.replace(/\.[^/.]+$/, '') || 'audio'
     setTrimmedFileName(`${baseName}_${formatTimeShort(start)}-${formatTimeShort(end)}.mp3`)
 
-    // Create URL for trimmed audio
-    const url = URL.createObjectURL(blob)
-    setAudioUrl(url)
-    setFile(new File([blob], `${baseName}_trimmed.mp3`, { type: 'audio/mp3' }))
-
-    // Reset region for new file
-    setSelectedRegion(null)
-
     toast({
       title: 'Аудио обрезано',
       description: `Создан файл ${formatTimeShort(start)}-${formatTimeShort(end)}`,
     })
   }, [file?.name, toast])
 
+  // Encode audio buffer to MP3
+  const encodeToMP3 = useCallback((buffer: AudioBuffer): Blob => {
+    const mp3encoder = new lamejs.Mp3Encoder(1, buffer.sampleRate, 128)
+    const samples = buffer.getChannelData(0)
+    const sampleBlockSize = 1152
+    const mp3Data: Int8Array[] = []
+
+    const samples16 = new Int16Array(samples.length)
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]))
+      samples16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+    }
+
+    for (let i = 0; i < samples16.length; i += sampleBlockSize) {
+      const chunk = samples16.subarray(i, i + sampleBlockSize)
+      const mp3buf = mp3encoder.encodeBuffer(chunk)
+      if (mp3buf.length > 0) {
+        mp3Data.push(mp3buf)
+      }
+    }
+
+    const mp3buf = mp3encoder.flush()
+    if (mp3buf.length > 0) {
+      mp3Data.push(mp3buf)
+    }
+
+    const totalLength = mp3Data.reduce((acc, arr) => acc + arr.length, 0)
+    const result = new Uint8Array(totalLength)
+    let offset = 0
+    for (const chunk of mp3Data) {
+      result.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.length), offset)
+      offset += chunk.length
+    }
+
+    return new Blob([result], { type: 'audio/mp3' })
+  }, [])
+
   const handleTranscribe = async () => {
     if (!socket || !isConnected) return
 
-    let fileToTranscribe: File | null = file
-    let fileSize = file?.size || 0
+    let fileToTranscribe: File | null = null
 
-    // If mode is selection and we have a trimmed blob, use that
-    if (transcriptionMode === 'selection' && trimmedBlob) {
+    if (transcriptionMode === 'selection' && selectedRegion && audioBuffer) {
+      // Encode selected region to MP3 on-the-fly
+      const startSample = Math.floor(selectedRegion.start * audioBuffer.sampleRate)
+      const endSample = Math.floor(selectedRegion.end * audioBuffer.sampleRate)
+      const numSamples = endSample - startSample
+
+      const offlineContext = new OfflineAudioContext(1, numSamples, audioBuffer.sampleRate)
+      const trimmedBuffer = offlineContext.createBuffer(1, numSamples, audioBuffer.sampleRate)
+      const destData = trimmedBuffer.getChannelData(0)
+
+      if (audioBuffer.numberOfChannels >= 2) {
+        const left = audioBuffer.getChannelData(0)
+        const right = audioBuffer.getChannelData(1)
+        for (let i = 0; i < numSamples; i++) {
+          destData[i] = (left[startSample + i] + right[startSample + i]) / 2
+        }
+      } else {
+        const source = audioBuffer.getChannelData(0)
+        for (let i = 0; i < numSamples; i++) {
+          destData[i] = source[startSample + i]
+        }
+      }
+
+      const mp3Blob = encodeToMP3(trimmedBuffer)
+      const fileName = `${file?.name?.replace(/\.[^/.]+$/, '') || 'audio'}_${formatTimeShort(selectedRegion.start)}-${formatTimeShort(selectedRegion.end)}.mp3`
+      fileToTranscribe = new File([mp3Blob], fileName, { type: 'audio/mp3' })
+
+      console.log(`Transcribing selection: ${formatTimeShort(selectedRegion.start)}-${formatTimeShort(selectedRegion.end)}, size: ${formatFileSize(mp3Blob.size)}`)
+    } else if (trimmedBlob && transcriptionMode === 'selection') {
       fileToTranscribe = new File([trimmedBlob], trimmedFileName || 'trimmed.mp3', { type: 'audio/mp3' })
-      fileSize = trimmedBlob.size
+    } else {
+      fileToTranscribe = file
     }
 
     if (!fileToTranscribe) return
@@ -326,7 +400,6 @@ export default function Home() {
         totalChunks: totalChunks
       })
 
-      // Wait a bit for session to be created
       await new Promise(r => setTimeout(r, 100))
 
       for (let i = 0; i < totalChunks; i++) {
@@ -401,6 +474,7 @@ export default function Home() {
     setAudioLoaded(false)
     setAudioLoading(false)
     setAudioDuration(0)
+    setAudioBuffer(null)
     setResult(null)
     setError(null)
     setStatus('idle')
@@ -412,12 +486,9 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  // Estimate processing time based on file size
   const estimatedTime = file ? Math.ceil(file.size / (1024 * 1024) * 0.5) : 0
-
-  // Calculate region duration
   const regionDuration = selectedRegion ? selectedRegion.end - selectedRegion.start : 0
-  const isRegionValid = regionDuration > 0.5 // At least 0.5 seconds
+  const isRegionValid = regionDuration > 0.5
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
@@ -524,7 +595,7 @@ export default function Home() {
           </CardContent>
         </Card>
 
-        {/* Waveform Editor - shows when file is loaded */}
+        {/* Waveform Editor */}
         {audioUrl && (
           <Card className="bg-slate-800/50 border-slate-700 mb-6">
             <CardHeader className="pb-3">
@@ -562,7 +633,7 @@ export default function Home() {
           </Alert>
         )}
 
-        {/* Transcription Controls - shows when file is loaded and idle */}
+        {/* Transcription Controls */}
         {audioLoaded && status === 'idle' && (
           <Card className="bg-slate-800/50 border-slate-700 mb-6">
             <CardHeader className="pb-3">
@@ -594,7 +665,7 @@ export default function Home() {
                 <Button
                   variant={transcriptionMode === 'selection' ? 'default' : 'outline'}
                   onClick={() => setTranscriptionMode('selection')}
-                  disabled={!isRegionValid && !trimmedBlob}
+                  disabled={!isRegionValid}
                   className={`h-auto py-4 justify-start ${transcriptionMode === 'selection' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600 hover:bg-slate-700'}`}
                 >
                   <div className="flex items-center gap-3">
@@ -604,9 +675,7 @@ export default function Home() {
                       <div className="text-xs opacity-70">
                         {selectedRegion && isRegionValid
                           ? `${formatTimeShort(selectedRegion.start)} - ${formatTimeShort(selectedRegion.end)} (${formatDuration(regionDuration)})`
-                          : trimmedBlob
-                            ? `${formatFileSize(trimmedBlob.size)} (вырезан)`
-                            : 'Выберите участок на波形'}
+                          : 'Выберите участок на waveform'}
                       </div>
                     </div>
                   </div>
@@ -615,7 +684,7 @@ export default function Home() {
 
               <Button
                 onClick={handleTranscribe}
-                disabled={!isConnected || (transcriptionMode === 'selection' && !trimmedBlob && !isRegionValid)}
+                disabled={!isConnected || (transcriptionMode === 'selection' && !isRegionValid)}
                 className="w-full bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
               >
                 <Mic className="w-5 h-5 mr-2" />
@@ -630,13 +699,11 @@ export default function Home() {
           <Card className="bg-slate-800/50 border-slate-700 mb-6">
             <CardContent className="pt-6">
               <div className="space-y-4">
-                {/* Timer */}
                 <div className="flex items-center justify-center gap-2 text-2xl font-mono text-emerald-400">
                   <Clock className="w-6 h-6" />
                   {formatTime(processingTime)}
                 </div>
 
-                {/* Upload progress */}
                 {uploadProgress < 100 && (
                   <div>
                     <div className="flex justify-between text-sm mb-1">
@@ -647,7 +714,6 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Processing progress */}
                 <div>
                   <div className="flex justify-between text-sm mb-1">
                     <span className="text-slate-400">Распознавание</span>
