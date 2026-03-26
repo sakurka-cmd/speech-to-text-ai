@@ -8,14 +8,14 @@ import { Progress } from '@/components/ui/progress'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import {
-  Mic,
-  Upload,
-  FileAudio,
-  Loader2,
-  CheckCircle2,
-  XCircle,
-  Copy,
+import { 
+  Mic, 
+  Upload, 
+  FileAudio, 
+  Loader2, 
+  CheckCircle2, 
+  XCircle, 
+  Copy, 
   Download,
   Trash2,
   Clock,
@@ -23,8 +23,7 @@ import {
   Wifi,
   WifiOff,
   AlertTriangle,
-  Scissors,
-  CheckCircle
+  Scissors
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 import WaveformEditor from '@/components/audio/WaveformEditor'
@@ -40,11 +39,6 @@ interface TranscriptionResult {
   fileSize: number
 }
 
-interface AudioRegion {
-  start: number
-  end: number
-}
-
 type Status = 'idle' | 'connecting' | 'uploading' | 'processing' | 'completed' | 'error'
 
 export default function Home() {
@@ -52,23 +46,22 @@ export default function Home() {
   const [progress, setProgress] = useState(0)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [file, setFile] = useState<File | null>(null)
-  const [audioUrl, setAudioUrl] = useState<string | null>(null)
-  const [audioLoaded, setAudioLoaded] = useState(false)
-  const [audioLoading, setAudioLoading] = useState(false)
-  const [audioDuration, setAudioDuration] = useState(0)
   const [result, setResult] = useState<TranscriptionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [socket, setSocket] = useState<Socket | null>(null)
   const [processingTime, setProcessingTime] = useState(0)
-  const [selectedRegion, setSelectedRegion] = useState<AudioRegion | null>(null)
-  const [trimmedBlob, setTrimmedBlob] = useState<Blob | null>(null)
-  const [trimmedFileName, setTrimmedFileName] = useState<string>('')
-  const [transcriptionMode, setTranscriptionMode] = useState<'full' | 'selection'>('full')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const processingStartTime = useRef<number>(0)
   const { toast } = useToast()
+  
+  // Audio processing state
+  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [selectedRegion, setSelectedRegion] = useState<{start: number, end: number} | null>(null)
+  const [isEncoding, setIsEncoding] = useState(false)
+  const audioContextRef = useRef<AudioContext | null>(null)
 
   // Timer for processing
   useEffect(() => {
@@ -85,7 +78,7 @@ export default function Home() {
   // Initialize WebSocket
   useEffect(() => {
     const wsUrl = typeof window !== 'undefined' ? window.location.origin : ''
-
+    
     const newSocket = io(wsUrl, {
       path: '/socket.io',
       transports: ['websocket', 'polling'],
@@ -164,9 +157,9 @@ export default function Home() {
 
     setSocket(newSocket)
     return () => { newSocket.close() }
-  }, [toast, file?.name])
+  }, [toast])
 
-  // Cleanup audio URL
+  // Cleanup audio URL when file changes
   useEffect(() => {
     return () => {
       if (audioUrl) {
@@ -185,29 +178,48 @@ export default function Home() {
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
+    const secs = Math.floor(seconds % 60)
     if (mins > 0) return `${mins}м ${secs}с`
     return `${secs}с`
   }
 
-  const formatTimeShort = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
+  const formatTimeShort = (time: number): string => {
+    const mins = Math.floor(time / 60)
+    const secs = Math.floor(time % 60)
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
-  const formatDuration = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${mins}:${secs.toString().padStart(2, '0')}`
+  // Load audio file and decode
+  const loadAudioFile = async (file: File) => {
+    try {
+      // Create object URL for audio element
+      const url = URL.createObjectURL(file)
+      setAudioUrl(url)
+
+      // Decode audio data for waveform
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)()
+      }
+
+      const arrayBuffer = await file.arrayBuffer()
+      const buffer = await audioContextRef.current.decodeAudioData(arrayBuffer)
+      setAudioBuffer(buffer)
+    } catch (err) {
+      console.error('Error loading audio:', err)
+      toast({
+        variant: 'destructive',
+        title: 'Ошибка загрузки аудио',
+        description: 'Не удалось загрузить аудиофайл для редактирования',
+      })
+    }
   }
 
-  const handleFileSelect = useCallback((selectedFile: File) => {
+  const handleFileSelect = useCallback(async (selectedFile: File) => {
     const validExtensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.webm', '.mp4', '.mpeg', '.mpga', '.oga']
     const ext = '.' + selectedFile.name.split('.').pop()?.toLowerCase()
-    const isValidType = selectedFile.type.startsWith('audio/') ||
-      selectedFile.type.startsWith('video/') ||
-      validExtensions.includes(ext)
+    const isValidType = selectedFile.type.startsWith('audio/') || 
+                        selectedFile.type.startsWith('video/') ||
+                        validExtensions.includes(ext)
 
     if (!isValidType) {
       toast({ variant: 'destructive', title: 'Неподдерживаемый формат' })
@@ -219,40 +231,18 @@ export default function Home() {
       return
     }
 
-    // Cleanup previous URL
-    if (audioUrl) {
-      URL.revokeObjectURL(audioUrl)
-    }
-
     setFile(selectedFile)
-    setAudioLoaded(false)
-    setAudioLoading(true)
-    setAudioDuration(0)
     setResult(null)
     setError(null)
     setStatus('idle')
     setProgress(0)
     setUploadProgress(0)
     setProcessingTime(0)
-    setTrimmedBlob(null)
     setSelectedRegion(null)
-
-    // Create object URL and get duration
-    const url = URL.createObjectURL(selectedFile)
-    setAudioUrl(url)
-
-    const audio = new Audio()
-    audio.onloadedmetadata = () => {
-      setAudioDuration(audio.duration)
-      setAudioLoaded(true)
-      setAudioLoading(false)
-    }
-    audio.onerror = () => {
-      setAudioLoading(false)
-      toast({ variant: 'destructive', title: 'Ошибка загрузки аудио' })
-    }
-    audio.src = url
-  }, [audioUrl, toast])
+    
+    // Load audio for waveform editor
+    await loadAudioFile(selectedFile)
+  }, [toast])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -270,33 +260,32 @@ export default function Home() {
     setIsDragging(false)
   }, [])
 
-  const handleRegionChange = useCallback((start: number, end: number) => {
-    setSelectedRegion({ start, end })
-  }, [])
-
-  const handleTrimmedAudio = useCallback((blob: Blob, start: number, end: number) => {
-    setTrimmedBlob(blob)
-    const baseName = file?.name.replace(/\.[^/.]+$/, '') || 'audio'
-    setTrimmedFileName(`${baseName}_${formatTimeShort(start)}-${formatTimeShort(end)}.mp3`)
-
-    toast({
-      title: 'Аудио обрезано',
-      description: `Создан файл ${formatTimeShort(start)}-${formatTimeShort(end)}`,
-    })
-  }, [file?.name, toast])
-
-  const handleTranscribe = async () => {
+  const handleTranscribe = async (useSelection: boolean = false) => {
     if (!socket || !isConnected) return
 
-    let fileToTranscribe: File | null = null
-
-    if (transcriptionMode === 'selection' && trimmedBlob) {
-      fileToTranscribe = new File([trimmedBlob], trimmedFileName || 'trimmed.mp3', { type: 'audio/mp3' })
-      console.log(`Transcribing trimmed audio: ${formatFileSize(trimmedBlob.size)}`)
-    } else {
-      fileToTranscribe = file
+    let fileToTranscribe: File | Blob | null = file
+    
+    // If using selection, encode it first
+    if (useSelection && selectedRegion && audioBuffer) {
+      setIsEncoding(true)
+      try {
+        const encodedBlob = await encodeSelectedRegion()
+        if (encodedBlob) {
+          fileToTranscribe = encodedBlob
+        } else {
+          toast({ variant: 'destructive', title: 'Ошибка кодирования выбранного фрагмента' })
+          setIsEncoding(false)
+          return
+        }
+      } catch (err) {
+        console.error('Encoding error:', err)
+        toast({ variant: 'destructive', title: 'Ошибка кодирования', description: String(err) })
+        setIsEncoding(false)
+        return
+      }
+      setIsEncoding(false)
     }
-
+    
     if (!fileToTranscribe) return
 
     setStatus('uploading')
@@ -305,18 +294,21 @@ export default function Home() {
     setError(null)
 
     try {
-      const arrayBuffer = await fileToTranscribe.arrayBuffer()
+      const arrayBuffer = await (fileToTranscribe instanceof File 
+        ? fileToTranscribe.arrayBuffer() 
+        : fileToTranscribe.arrayBuffer())
       const totalSize = arrayBuffer.byteLength
       const totalChunks = Math.ceil(totalSize / CHUNK_SIZE)
-
+      
       console.log(`File: ${totalSize} bytes, ${totalChunks} chunks`)
 
       socket.emit('start-upload', {
-        fileName: fileToTranscribe.name,
+        fileName: fileToTranscribe instanceof File ? fileToTranscribe.name : `selection_${formatTimeShort(selectedRegion?.start || 0)}-${formatTimeShort(selectedRegion?.end || 0)}.mp3`,
         fileSize: totalSize,
         totalChunks: totalChunks
       })
 
+      // Wait a bit for session to be created
       await new Promise(r => setTimeout(r, 100))
 
       for (let i = 0; i < totalChunks; i++) {
@@ -329,7 +321,7 @@ export default function Home() {
           binary += String.fromCharCode(bytes[j])
         }
         const chunkBase64 = btoa(binary)
-
+        
         socket.emit('upload-chunk', {
           chunkIndex: i,
           chunkData: chunkBase64,
@@ -337,7 +329,7 @@ export default function Home() {
         })
 
         setUploadProgress((i + 1) / totalChunks * 100)
-
+        
         if (i < totalChunks - 1) {
           await new Promise(r => setTimeout(r, 50))
         }
@@ -349,6 +341,119 @@ export default function Home() {
       setStatus('error')
       setError(err.message)
       toast({ variant: 'destructive', title: 'Ошибка', description: err.message })
+    }
+  }
+
+  // Encode selected region to MP3/WAV
+  const encodeSelectedRegion = async (): Promise<Blob | null> => {
+    if (!audioBuffer || !selectedRegion) return null
+
+    const startSample = Math.floor(selectedRegion.start * audioBuffer.sampleRate)
+    const endSample = Math.floor(selectedRegion.end * audioBuffer.sampleRate)
+    const length = endSample - startSample
+
+    // Create a new buffer for the selected region
+    const newBuffer = new AudioContext().createBuffer(
+      audioBuffer.numberOfChannels,
+      length,
+      audioBuffer.sampleRate
+    )
+
+    for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+      const sourceData = audioBuffer.getChannelData(channel)
+      const destData = newBuffer.getChannelData(channel)
+      for (let i = 0; i < length; i++) {
+        destData[i] = sourceData[startSample + i]
+      }
+    }
+
+    // Try MP3 first, fallback to WAV
+    return encodeToWav(newBuffer)
+  }
+
+  // Encode AudioBuffer to WAV
+  const encodeToWav = (buffer: AudioBuffer): Blob => {
+    const numChannels = buffer.numberOfChannels
+    const sampleRate = buffer.sampleRate
+    const format = 1 // PCM
+    const bitDepth = 16
+
+    const bytesPerSample = bitDepth / 8
+    const blockAlign = numChannels * bytesPerSample
+    const byteRate = sampleRate * blockAlign
+    const dataSize = buffer.length * blockAlign
+    const headerSize = 44
+    const totalSize = headerSize + dataSize
+
+    const arrayBuffer = new ArrayBuffer(totalSize)
+    const view = new DataView(arrayBuffer)
+
+    // RIFF header
+    writeString(view, 0, 'RIFF')
+    view.setUint32(4, totalSize - 8, true)
+    writeString(view, 8, 'WAVE')
+
+    // fmt chunk
+    writeString(view, 12, 'fmt ')
+    view.setUint32(16, 16, true)
+    view.setUint16(20, format, true)
+    view.setUint16(22, numChannels, true)
+    view.setUint32(24, sampleRate, true)
+    view.setUint32(28, byteRate, true)
+    view.setUint16(32, blockAlign, true)
+    view.setUint16(34, bitDepth, true)
+
+    // data chunk
+    writeString(view, 36, 'data')
+    view.setUint32(40, dataSize, true)
+
+    // Write samples
+    const channels = []
+    for (let i = 0; i < numChannels; i++) {
+      channels.push(buffer.getChannelData(i))
+    }
+
+    let offset = 44
+    for (let i = 0; i < buffer.length; i++) {
+      for (let channel = 0; channel < numChannels; channel++) {
+        const sample = Math.max(-1, Math.min(1, channels[channel][i]))
+        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF
+        view.setInt16(offset, intSample, true)
+        offset += 2
+      }
+    }
+
+    return new Blob([arrayBuffer], { type: 'audio/wav' })
+  }
+
+  const writeString = (view: DataView, offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i))
+    }
+  }
+
+  // Download selected region
+  const handleDownloadSelection = async () => {
+    if (!selectedRegion || !audioBuffer) return
+    
+    setIsEncoding(true)
+    try {
+      const blob = await encodeSelectedRegion()
+      if (blob) {
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        const ext = blob.type === 'audio/mp3' ? 'mp3' : 'wav'
+        a.download = `audio_selection_${formatTimeShort(selectedRegion.start)}-${formatTimeShort(selectedRegion.end)}.${ext}`
+        a.click()
+        URL.revokeObjectURL(url)
+        toast({ title: 'Файл сохранён', description: `Выбранный фрагмент сохранён как ${a.download}` })
+      }
+    } catch (err) {
+      console.error('Download error:', err)
+      toast({ variant: 'destructive', title: 'Ошибка сохранения', description: String(err) })
+    } finally {
+      setIsEncoding(false)
     }
   }
 
@@ -371,43 +476,33 @@ export default function Home() {
     }
   }
 
-  const handleDownloadTrimmed = () => {
-    if (trimmedBlob) {
-      const url = URL.createObjectURL(trimmedBlob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = trimmedFileName || 'trimmed.mp3'
-      a.click()
-      URL.revokeObjectURL(url)
-    }
-  }
-
   const handleReset = () => {
-    if (audioUrl) {
-      URL.revokeObjectURL(audioUrl)
-    }
     setFile(null)
-    setAudioUrl(null)
-    setAudioLoaded(false)
-    setAudioLoading(false)
-    setAudioDuration(0)
     setResult(null)
     setError(null)
     setStatus('idle')
     setProgress(0)
     setUploadProgress(0)
     setProcessingTime(0)
-    setTrimmedBlob(null)
+    setAudioBuffer(null)
+    if (audioUrl) {
+      URL.revokeObjectURL(audioUrl)
+      setAudioUrl(null)
+    }
     setSelectedRegion(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const estimatedTime = file ? Math.ceil(file.size / (1024 * 1024) * 0.5) : 0
-  const regionDuration = selectedRegion ? selectedRegion.end - selectedRegion.start : 0
+  const handleRegionSelect = (start: number, end: number) => {
+    setSelectedRegion({ start, end })
+  }
+
+  // Estimate processing time based on file size
+  const estimatedTime = file ? Math.ceil(file.size / (1024 * 1024) * 0.5) : 0 // ~30s per MB
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
-      <div className="container mx-auto px-4 py-8 max-w-5xl">
+      <div className="container mx-auto px-4 py-8 max-w-4xl">
         {/* Header */}
         <div className="text-center mb-8">
           <div className="flex items-center justify-center gap-3 mb-4">
@@ -437,7 +532,7 @@ export default function Home() {
           <Alert className="bg-yellow-500/10 border-yellow-500/50 mb-6">
             <AlertTriangle className="w-5 h-5 text-yellow-400" />
             <AlertDescription className="text-yellow-300">
-              Большой файл (~{formatFileSize(file.size)}). Обработка займёт примерно {estimatedTime} минут.
+              Большой файл (~{formatFileSize(file.size)}). Обработка займёт примерно {estimatedTime} минут. 
               Не закрывайте страницу во время обработки.
             </AlertDescription>
           </Alert>
@@ -445,10 +540,10 @@ export default function Home() {
 
         {/* Upload Area */}
         <Card className="bg-slate-800/50 border-slate-700 mb-6">
-          <CardHeader className="pb-3">
+          <CardHeader>
             <CardTitle className="text-white flex items-center gap-2">
               <Upload className="w-5 h-5 text-emerald-400" />
-              Аудиофайл
+              Загрузка файла
             </CardTitle>
             <CardDescription className="text-slate-400">
               WAV, MP3, M4A, FLAC, OGG, WebM, MP4 (до 100MB)
@@ -456,13 +551,13 @@ export default function Home() {
           </CardHeader>
           <CardContent>
             <div
-              className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all
-            ${isDragging ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-600 hover:border-slate-500'}
-            ${audioLoaded ? 'border-emerald-500/50 bg-emerald-500/5' : ''}`}
+              className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all
+                ${isDragging ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-600 hover:border-slate-500'}
+                ${file ? 'border-emerald-500/50 bg-emerald-500/5' : ''}`}
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
-              onClick={() => !audioLoading && fileInputRef.current?.click()}
+              onClick={() => fileInputRef.current?.click()}
             >
               <input
                 ref={fileInputRef}
@@ -471,142 +566,112 @@ export default function Home() {
                 className="hidden"
                 onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
               />
-
-              {audioLoading ? (
-                <div className="space-y-3">
-                  <Loader2 className="w-10 h-10 text-emerald-400 mx-auto animate-spin" />
-                  <p className="text-white font-medium">Загрузка аудио...</p>
-                </div>
-              ) : audioLoaded && file ? (
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <CheckCircle2 className="w-8 h-8 text-emerald-400" />
-                    <div className="text-left">
-                      <p className="text-white font-medium">{file.name}</p>
-                      <p className="text-slate-400 text-sm">{formatFileSize(file.size)} • {formatDuration(audioDuration)}</p>
-                    </div>
+              
+              {file ? (
+                <div className="flex items-center justify-center gap-3">
+                  <FileAudio className="w-12 h-12 text-emerald-400" />
+                  <div className="text-left">
+                    <p className="text-white font-medium">{file.name}</p>
+                    <p className="text-slate-400 text-sm">{formatFileSize(file.size)}</p>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleReset()
-                    }}
-                    className="border-slate-600 text-slate-300 hover:bg-slate-700"
-                  >
-                    <Trash2 className="w-4 h-4 mr-1" />
-                    Другой файл
-                  </Button>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <Upload className="w-10 h-10 text-slate-400 mx-auto" />
+                  <Upload className="w-12 h-12 text-slate-400 mx-auto" />
                   <p className="text-white font-medium">Перетащите файл сюда</p>
                   <p className="text-slate-400 text-sm">или нажмите для выбора</p>
                 </div>
+              )}
+            </div>
+
+            <div className="flex gap-3 mt-4">
+              <Button
+                onClick={() => handleTranscribe(false)}
+                disabled={!file || status === 'processing' || status === 'uploading' || !isConnected}
+                className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
+              >
+                {status === 'uploading' || status === 'processing' ? (
+                  <>
+                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                    Обработка...
+                  </>
+                ) : (
+                  <>
+                    <Mic className="w-5 h-5 mr-2" />
+                    Распознать весь файл
+                  </>
+                )}
+              </Button>
+              
+              {file && (
+                <Button
+                  onClick={handleReset}
+                  variant="outline"
+                  className="border-slate-600 text-slate-300"
+                  disabled={status === 'processing' || status === 'uploading'}
+                >
+                  <Trash2 className="w-5 h-5" />
+                </Button>
               )}
             </div>
           </CardContent>
         </Card>
 
         {/* Waveform Editor */}
-        {audioUrl && (
+        {audioBuffer && audioUrl && (
           <Card className="bg-slate-800/50 border-slate-700 mb-6">
-            <CardHeader className="pb-3">
+            <CardHeader>
               <CardTitle className="text-white flex items-center gap-2">
-                <Scissors className="w-5 h-5 text-emerald-400" />
-                Редактор
+                <FileAudio className="w-5 h-5 text-emerald-400" />
+                Редактор аудио
               </CardTitle>
               <CardDescription className="text-slate-400">
-                Прослушайте аудио и выберите участок для распознавания
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <WaveformEditor
-                audioFile={file}
-                audioUrl={audioUrl}
-                onRegionChange={handleRegionChange}
-                onTrimmedAudio={handleTrimmedAudio}
-                onLoadingChange={setAudioLoading}
-                onLoadedChange={setAudioLoaded}
-              />
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Trimmed audio info */}
-        {trimmedBlob && (
-          <Alert className="bg-emerald-500/10 border-emerald-500/50 mb-6">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-            <AlertDescription className="text-emerald-300 flex items-center justify-between">
-              <span>Вырезанный фрагмент: {formatFileSize(trimmedBlob.size)} ({trimmedFileName})</span>
-              <Button variant="link" size="sm" onClick={handleDownloadTrimmed} className="text-emerald-400">
-                <Download className="w-4 h-4 mr-1" /> Скачать
-              </Button>
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {/* Transcription Controls */}
-        {audioLoaded && status === 'idle' && (
-          <Card className="bg-slate-800/50 border-slate-700 mb-6">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-white flex items-center gap-2">
-                <Mic className="w-5 h-5 text-emerald-400" />
-                Распознавание
-              </CardTitle>
-              <CardDescription className="text-slate-400">
-                {transcriptionMode === 'selection' && !trimmedBlob
-                  ? 'Нажмите "Вырезать MP3" чтобы сохранить выбранный участок для распознавания'
-                  : 'Выберите что распознать: весь файл или сохранённый участок'}
+                Выберите фрагмент для распознавания или сохранения
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Button
-                  variant={transcriptionMode === 'full' ? 'default' : 'outline'}
-                  onClick={() => setTranscriptionMode('full')}
-                  className={`h-auto py-4 justify-start ${transcriptionMode === 'full' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600 hover:bg-slate-700'}`}
-                >
-                  <div className="flex items-center gap-3">
-                    <FileAudio className="w-6 h-6" />
-                    <div className="text-left">
-                      <div className="font-medium">Весь файл</div>
-                      <div className="text-xs opacity-70">
-                        {formatFileSize(file?.size || 0)} • {formatDuration(audioDuration)}
-                      </div>
-                    </div>
-                  </div>
-                </Button>
-                <Button
-                  variant={transcriptionMode === 'selection' ? 'default' : 'outline'}
-                  onClick={() => setTranscriptionMode('selection')}
-                  disabled={!trimmedBlob}
-                  className={`h-auto py-4 justify-start ${transcriptionMode === 'selection' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600 hover:bg-slate-700'}`}
-                >
-                  <div className="flex items-center gap-3">
-                    <Scissors className="w-6 h-6" />
-                    <div className="text-left">
-                      <div className="font-medium">Выбранный участок</div>
-                      <div className="text-xs opacity-70">
-                        {trimmedBlob
-                          ? `${formatFileSize(trimmedBlob.size)} (${trimmedFileName})`
-                          : 'Сначала вырежьте участок'}
-                      </div>
-                    </div>
-                  </div>
-                </Button>
-              </div>
+              <WaveformEditor
+                audioBuffer={audioBuffer}
+                audioUrl={audioUrl}
+                onRegionSelect={handleRegionSelect}
+              />
 
-              <Button
-                onClick={handleTranscribe}
-                disabled={!isConnected || (transcriptionMode === 'selection' && !trimmedBlob)}
-                className="w-full bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
-              >
-                <Mic className="w-5 h-5 mr-2" />
-                Распознать {transcriptionMode === 'selection' ? 'выбранный участок' : 'весь файл'}
-              </Button>
+              {/* Selection actions */}
+              {selectedRegion && selectedRegion.end - selectedRegion.start > 0.5 && (
+                <div className="flex flex-wrap gap-3 pt-4 border-t border-slate-700">
+                  <Button
+                    onClick={() => handleTranscribe(true)}
+                    disabled={status === 'processing' || status === 'uploading' || isEncoding || !isConnected}
+                    className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:opacity-50"
+                  >
+                    {isEncoding ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Кодирование...
+                      </>
+                    ) : (
+                      <>
+                        <Mic className="w-4 h-4 mr-2" />
+                        Распознать выбранный участок
+                      </>
+                    )}
+                  </Button>
+                  
+                  <Button
+                    onClick={handleDownloadSelection}
+                    disabled={isEncoding}
+                    variant="outline"
+                    className="border-blue-500 text-blue-400 hover:bg-blue-500/10"
+                  >
+                    {isEncoding ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <Scissors className="w-4 h-4 mr-2" />
+                    )}
+                    Вырезать в WAV
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
         )}
@@ -616,11 +681,13 @@ export default function Home() {
           <Card className="bg-slate-800/50 border-slate-700 mb-6">
             <CardContent className="pt-6">
               <div className="space-y-4">
+                {/* Timer */}
                 <div className="flex items-center justify-center gap-2 text-2xl font-mono text-emerald-400">
                   <Clock className="w-6 h-6" />
                   {formatTime(processingTime)}
                 </div>
-
+                
+                {/* Upload progress */}
                 {uploadProgress < 100 && (
                   <div>
                     <div className="flex justify-between text-sm mb-1">
@@ -630,7 +697,8 @@ export default function Home() {
                     <Progress value={uploadProgress} className="h-2" />
                   </div>
                 )}
-
+                
+                {/* Processing progress */}
                 <div>
                   <div className="flex justify-between text-sm mb-1">
                     <span className="text-slate-400">Распознавание</span>
@@ -638,16 +706,16 @@ export default function Home() {
                   </div>
                   <Progress value={progress} className="h-3" />
                 </div>
-
+                
                 <p className="text-center text-slate-400 text-sm">
                   {progress < 20 && 'Анализ аудио...'}
                   {progress >= 20 && progress < 50 && 'Распознавание речи...'}
                   {progress >= 50 && progress < 80 && 'Обработка текста...'}
                   {progress >= 80 && 'Почти готово...'}
                 </p>
-
+                
                 <p className="text-center text-yellow-400 text-xs">
-                  ⏱ Не закрывайте страницу. Обработка может занять до 30 минут для больших файлов.
+                  Не закрывайте страницу. Обработка может занять до 30 минут для больших файлов.
                 </p>
               </div>
             </CardContent>

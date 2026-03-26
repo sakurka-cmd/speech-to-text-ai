@@ -1,173 +1,85 @@
 'use client'
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useRef, useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
-import { Badge } from '@/components/ui/badge'
-import { Progress } from '@/components/ui/progress'
-import {
-  Play,
-  Pause,
-  SkipBack,
-  SkipForward,
-  ZoomIn,
-  ZoomOut,
-  Scissors,
-  RotateCcw,
-  Volume2,
-  VolumeX,
-  Loader2,
-  CheckCircle,
-  AlertCircle
-} from 'lucide-react'
+import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, ZoomIn, ZoomOut, Scissors } from 'lucide-react'
+
+// Import lamejs dynamically to avoid SSR issues
+// @ts-ignore
+let lamejs: any = null
 
 interface WaveformEditorProps {
-  audioFile: File | null
+  audioBuffer: AudioBuffer | null
   audioUrl: string | null
-  onRegionChange?: (start: number, end: number) => void
-  onTrimmedAudio?: (blob: Blob, start: number, end: number) => void
-  onLoadingChange?: (loading: boolean) => void
-  onLoadedChange?: (loaded: boolean) => void
+  onRegionSelect?: (start: number, end: number) => void
+  onRegionEncoded?: (blob: Blob, start: number, end: number) => void
 }
 
-interface AudioRegion {
-  start: number
-  end: number
+interface Region {
+  start: number // in seconds
+  end: number // in seconds
 }
-
-// Store lamejs module reference
-let lamejsModule: any = null
 
 export default function WaveformEditor({
-  audioFile,
+  audioBuffer,
   audioUrl,
-  onRegionChange,
-  onTrimmedAudio,
-  onLoadingChange,
-  onLoadedChange
+  onRegionSelect,
+  onRegionEncoded
 }: WaveformEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
-  const audioContextRef = useRef<AudioContext | null>(null)
-  const audioBufferRef = useRef<AudioBuffer | null>(null)
-
+  const containerRef = useRef<HTMLDivElement>(null)
+  
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
+  const [volume, setVolume] = useState(1)
+  const [isMuted, setIsMuted] = useState(false)
   const [zoom, setZoom] = useState(1)
-  const [zoomOffset, setZoomOffset] = useState(0)
-  const [region, setRegion] = useState<AudioRegion | null>(null)
+  const [region, setRegion] = useState<Region | null>(null)
   const [isDragging, setIsDragging] = useState<'start' | 'end' | 'move' | null>(null)
   const [waveformData, setWaveformData] = useState<number[]>([])
-  const [isMuted, setIsMuted] = useState(false)
-  const [isLoading, setIsLoading] = useState(false)
-  const [loadProgress, setLoadProgress] = useState(0)
-  const [isReady, setIsReady] = useState(false)
   const [isEncoding, setIsEncoding] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const containerRef = useRef<HTMLDivElement>(null)
+  const [panOffset, setPanOffset] = useState(0)
 
   // Load lamejs dynamically
   useEffect(() => {
-    if (!lamejsModule) {
+    if (typeof window !== 'undefined') {
       import('lamejs').then((module) => {
-        lamejsModule = module.default || module
-        console.log('lamejs loaded successfully')
-      }).catch((err) => {
+        lamejs = module.default || module
+      }).catch(err => {
         console.error('Failed to load lamejs:', err)
-        setError('Не удалось загрузить кодировщик MP3')
       })
     }
   }, [])
 
-  // Notify parent of loading state changes
+  // Generate waveform data
   useEffect(() => {
-    onLoadingChange?.(isLoading)
-  }, [isLoading, onLoadingChange])
+    if (!audioBuffer) return
 
-  useEffect(() => {
-    onLoadedChange?.(isReady)
-  }, [isReady, onLoadedChange])
+    const channelData = audioBuffer.getChannelData(0)
+    const samples = 500 // Number of bars
+    const blockSize = Math.floor(channelData.length / samples)
+    const data: number[] = []
 
-  // Load and decode audio
-  useEffect(() => {
-    if (!audioUrl) {
-      setWaveformData([])
-      setDuration(0)
-      setCurrentTime(0)
-      setRegion(null)
-      setLoadProgress(0)
-      setIsReady(false)
-      setError(null)
-      audioBufferRef.current = null
-      return
-    }
-
-    const loadAudio = async () => {
-      setIsLoading(true)
-      setLoadProgress(0)
-      setIsReady(false)
-      setError(null)
-
-      try {
-        setLoadProgress(10)
-
-        const response = await fetch(audioUrl)
-        setLoadProgress(20)
-
-        const arrayBuffer = await response.arrayBuffer()
-        setLoadProgress(40)
-
-        if (!audioContextRef.current) {
-          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)()
-        }
-
-        setLoadProgress(50)
-        const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer)
-        audioBufferRef.current = audioBuffer
-        setLoadProgress(70)
-
-        // Generate waveform data
-        const channelData = audioBuffer.getChannelData(0)
-        const samples = 200
-        const blockSize = Math.floor(channelData.length / samples)
-        const waveform: number[] = []
-
-        for (let i = 0; i < samples; i++) {
-          let sum = 0
-          for (let j = 0; j < blockSize; j++) {
-            sum += Math.abs(channelData[i * blockSize + j])
-          }
-          waveform.push(sum / blockSize)
-        }
-
-        setLoadProgress(90)
-
-        const max = Math.max(...waveform)
-        const normalized = waveform.map(v => max > 0 ? v / max : 0)
-
-        setWaveformData(normalized)
-        setDuration(audioBuffer.duration)
-        setCurrentTime(0)
-        setRegion({ start: 0, end: audioBuffer.duration })
-
-        setLoadProgress(100)
-        setIsReady(true)
-
-      } catch (err) {
-        console.error('Error loading audio:', err)
-        setError('Ошибка загрузки аудио')
-      } finally {
-        setIsLoading(false)
+    for (let i = 0; i < samples; i++) {
+      const start = blockSize * i
+      let sum = 0
+      for (let j = 0; j < blockSize; j++) {
+        sum += Math.abs(channelData[start + j] || 0)
       }
+      data.push(sum / blockSize)
     }
 
-    loadAudio()
-  }, [audioUrl])
+    // Normalize
+    const max = Math.max(...data)
+    const normalized = data.map(d => d / max)
+    setWaveformData(normalized)
+  }, [audioBuffer])
 
   // Draw waveform
-  useEffect(() => {
+  const drawWaveform = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || waveformData.length === 0) return
 
@@ -176,49 +88,43 @@ export default function WaveformEditor({
 
     const dpr = window.devicePixelRatio || 1
     const rect = canvas.getBoundingClientRect()
-
-    canvas.width = rect.width * dpr
+    canvas.width = rect.width * dpr * zoom
     canvas.height = rect.height * dpr
     ctx.scale(dpr, dpr)
 
-    const width = rect.width
+    const width = rect.width * zoom
     const height = rect.height
 
+    // Background
     ctx.fillStyle = '#1e293b'
     ctx.fillRect(0, 0, width, height)
 
-    const visibleSamples = Math.ceil(waveformData.length / zoom)
-    const startSample = Math.floor(zoomOffset * (waveformData.length - visibleSamples))
+    // Draw waveform bars
+    const barWidth = width / waveformData.length
+    const centerY = height / 2
 
-    const barWidth = width / visibleSamples
-    const gradient = ctx.createLinearGradient(0, 0, 0, height)
-    gradient.addColorStop(0, '#10b981')
-    gradient.addColorStop(0.5, '#34d399')
-    gradient.addColorStop(1, '#10b981')
+    ctx.fillStyle = '#10b981'
 
-    ctx.fillStyle = gradient
-
-    for (let i = 0; i < visibleSamples; i++) {
-      const dataIndex = startSample + i
-      if (dataIndex >= waveformData.length) break
-
-      const value = waveformData[dataIndex]
-      const barHeight = value * height * 0.8
+    waveformData.forEach((value, i) => {
       const x = i * barWidth
-      const y = (height - barHeight) / 2
+      const barHeight = value * (height * 0.8)
+      
+      // Draw from center
+      ctx.fillRect(x, centerY - barHeight / 2, barWidth - 1, barHeight)
+    })
 
-      ctx.fillRect(x, y, Math.max(1, barWidth - 1), barHeight)
-    }
-
+    // Draw region selection
     if (region && duration > 0) {
-      const startX = ((region.start / duration) * width - zoomOffset * width) * zoom
-      const endX = ((region.end / duration) * width - zoomOffset * width) * zoom
-      const regionWidth = Math.max(0, endX - startX)
+      const startX = (region.start / duration) * width - panOffset
+      const endX = (region.end / duration) * width - panOffset
+      const regionWidth = endX - startX
 
-      ctx.fillStyle = 'rgba(16, 185, 129, 0.3)'
+      // Region background
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.3)'
       ctx.fillRect(startX, 0, regionWidth, height)
 
-      ctx.strokeStyle = '#10b981'
+      // Region borders
+      ctx.strokeStyle = '#3b82f6'
       ctx.lineWidth = 2
       ctx.beginPath()
       ctx.moveTo(startX, 0)
@@ -227,73 +133,63 @@ export default function WaveformEditor({
       ctx.lineTo(endX, height)
       ctx.stroke()
 
-      ctx.fillStyle = '#10b981'
+      // Handles
+      ctx.fillStyle = '#3b82f6'
       ctx.fillRect(startX - 4, 0, 8, height)
       ctx.fillRect(endX - 4, 0, 8, height)
     }
 
+    // Draw playhead
     if (duration > 0) {
-      const playheadX = ((currentTime / duration) * width - zoomOffset * width) * zoom
-      ctx.strokeStyle = '#f43f5e'
+      const playheadX = (currentTime / duration) * width * zoom - panOffset
+      ctx.strokeStyle = '#ef4444'
       ctx.lineWidth = 2
       ctx.beginPath()
       ctx.moveTo(playheadX, 0)
       ctx.lineTo(playheadX, height)
       ctx.stroke()
     }
+  }, [waveformData, region, currentTime, duration, zoom, panOffset])
 
-    ctx.fillStyle = '#94a3b8'
-    ctx.font = '11px monospace'
-    const markerInterval = getMarkerInterval(duration / zoom)
-    for (let t = 0; t <= duration; t += markerInterval) {
-      const x = ((t / duration) * width - zoomOffset * width) * zoom
-      if (x >= 0 && x <= width) {
-        ctx.fillRect(x, height - 15, 1, 10)
-        ctx.fillText(formatTime(t), x + 3, height - 3)
-      }
-    }
-  }, [waveformData, region, currentTime, duration, zoom, zoomOffset])
+  useEffect(() => {
+    drawWaveform()
+  }, [drawWaveform])
 
-  // Update current time during playback
+  // Handle window resize
+  useEffect(() => {
+    const handleResize = () => drawWaveform()
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [drawWaveform])
+
+  // Audio element events
   useEffect(() => {
     const audio = audioRef.current
     if (!audio) return
 
-    const updateProgress = () => setCurrentTime(audio.currentTime)
-    audio.addEventListener('timeupdate', updateProgress)
-    audio.addEventListener('ended', () => setIsPlaying(false))
-    audio.addEventListener('loadedmetadata', () => setDuration(audio.duration))
+    const handleTimeUpdate = () => setCurrentTime(audio.currentTime)
+    const handleLoadedMetadata = () => setDuration(audio.duration)
+    const handleEnded = () => setIsPlaying(false)
+    const handlePlay = () => setIsPlaying(true)
+    const handlePause = () => setIsPlaying(false)
+
+    audio.addEventListener('timeupdate', handleTimeUpdate)
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata)
+    audio.addEventListener('ended', handleEnded)
+    audio.addEventListener('play', handlePlay)
+    audio.addEventListener('pause', handlePause)
 
     return () => {
-      audio.removeEventListener('timeupdate', updateProgress)
-      audio.removeEventListener('ended', () => setIsPlaying(false))
-      audio.removeEventListener('loadedmetadata', () => setDuration(audio.duration))
+      audio.removeEventListener('timeupdate', handleTimeUpdate)
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata)
+      audio.removeEventListener('ended', handleEnded)
+      audio.removeEventListener('play', handlePlay)
+      audio.removeEventListener('pause', handlePause)
     }
   }, [audioUrl])
 
-  const getMarkerInterval = (visibleDuration: number): number => {
-    if (visibleDuration < 10) return 1
-    if (visibleDuration < 30) return 5
-    if (visibleDuration < 60) return 10
-    if (visibleDuration < 300) return 30
-    return 60
-  }
-
-  const formatTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    const ms = Math.floor((seconds % 1) * 10)
-    if (mins > 0) return `${mins}:${secs.toString().padStart(2, '0')}`
-    return `${secs}.${ms}s`
-  }
-
-  const formatTimeFull = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
-
-  const togglePlay = useCallback(() => {
+  // Playback controls
+  const togglePlay = () => {
     const audio = audioRef.current
     if (!audio) return
 
@@ -302,346 +198,425 @@ export default function WaveformEditor({
     } else {
       audio.play()
     }
-    setIsPlaying(!isPlaying)
-  }, [isPlaying])
+  }
 
-  const seekTo = useCallback((time: number) => {
+  const skipBack = () => {
     const audio = audioRef.current
     if (!audio) return
-    audio.currentTime = Math.max(0, Math.min(time, duration))
-    setCurrentTime(audio.currentTime)
-  }, [duration])
+    audio.currentTime = Math.max(0, audio.currentTime - 10)
+  }
 
-  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+  const skipForward = () => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.currentTime = Math.min(duration, audio.currentTime + 10)
+  }
+
+  const toggleMute = () => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.muted = !isMuted
+    setIsMuted(!isMuted)
+  }
+
+  const handleVolumeChange = (value: number[]) => {
+    const audio = audioRef.current
+    if (!audio) return
+    const newVolume = value[0]
+    audio.volume = newVolume
+    setVolume(newVolume)
+    setIsMuted(newVolume === 0)
+  }
+
+  const handleSeek = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    const audio = audioRef.current
+    if (!canvas || !audio || duration === 0) return
+
+    const rect = canvas.getBoundingClientRect()
+    const x = e.clientX - rect.left + panOffset
+    const newTime = (x / (rect.width * zoom)) * duration
+    audio.currentTime = Math.max(0, Math.min(duration, newTime))
+  }
+
+  // Region selection
+  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas || duration === 0) return
 
     const rect = canvas.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const time = ((x / rect.width + zoomOffset) / zoom) * duration
-    seekTo(time)
-  }, [duration, zoom, zoomOffset, seekTo])
+    const x = e.clientX - rect.left + panOffset
+    const time = (x / (rect.width * zoom)) * duration
 
-  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current
-    if (!canvas || !region || duration === 0) return
+    // Check if clicking on region handles
+    if (region) {
+      const startX = (region.start / duration) * rect.width * zoom - panOffset
+      const endX = (region.end / duration) * rect.width * zoom - panOffset
 
-    const rect = canvas.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const time = ((x / rect.width + zoomOffset) / zoom) * duration
-
-    const startPixel = ((region.start / duration) - zoomOffset) * zoom * rect.width
-    const endPixel = ((region.end / duration) - zoomOffset) * zoom * rect.width
-
-    if (Math.abs(x - startPixel) < 10) {
-      setIsDragging('start')
-    } else if (Math.abs(x - endPixel) < 10) {
-      setIsDragging('end')
-    } else if (x > startPixel && x < endPixel) {
-      setIsDragging('move')
+      if (Math.abs(x - startX - panOffset) < 10) {
+        setIsDragging('start')
+        return
+      }
+      if (Math.abs(x - endX - panOffset) < 10) {
+        setIsDragging('end')
+        return
+      }
+      if (x > startX + panOffset && x < endX + panOffset) {
+        setIsDragging('move')
+        return
+      }
     }
-  }, [region, duration, zoom, zoomOffset])
 
-  const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDragging || !region || duration === 0) return
+    // Start new selection
+    setRegion({ start: time, end: time })
+    setIsDragging('end')
+  }
+
+  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDragging || !region) return
 
     const canvas = canvasRef.current
-    if (!canvas) return
+    if (!canvas || duration === 0) return
 
     const rect = canvas.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const time = Math.max(0, Math.min(duration, ((x / rect.width + zoomOffset) / zoom) * duration))
+    const x = e.clientX - rect.left + panOffset
+    let time = (x / (rect.width * zoom)) * duration
+    time = Math.max(0, Math.min(duration, time))
 
     if (isDragging === 'start') {
-      const newStart = Math.min(time, region.end - 0.1)
-      const newRegion = { ...region, start: newStart }
-      setRegion(newRegion)
-      onRegionChange?.(newStart, region.end)
+      setRegion({ ...region, start: Math.min(time, region.end - 0.1) })
     } else if (isDragging === 'end') {
-      const newEnd = Math.max(time, region.start + 0.1)
-      const newRegion = { ...region, end: newEnd }
-      setRegion(newRegion)
-      onRegionChange?.(region.start, newEnd)
+      setRegion({ ...region, end: Math.max(time, region.start + 0.1) })
     } else if (isDragging === 'move') {
-      const regionDuration = region.end - region.start
-      let newStart = time - regionDuration / 2
-      let newEnd = time + regionDuration / 2
-
-      if (newStart < 0) {
-        newStart = 0
-        newEnd = regionDuration
-      }
-      if (newEnd > duration) {
-        newEnd = duration
-        newStart = duration - regionDuration
-      }
-
-      const newRegion = { start: newStart, end: newEnd }
-      setRegion(newRegion)
-      onRegionChange?.(newStart, newEnd)
-    }
-  }, [isDragging, region, duration, zoom, zoomOffset, onRegionChange])
-
-  const handleCanvasMouseUp = useCallback(() => setIsDragging(null), [])
-
-  const zoomIn = useCallback(() => setZoom(z => Math.min(10, z * 1.5)), [])
-  const zoomOut = useCallback(() => setZoom(z => Math.max(1, z / 1.5)), [])
-
-  const resetRegion = useCallback(() => {
-    if (duration > 0) {
-      const newRegion = { start: 0, end: duration }
-      setRegion(newRegion)
-      onRegionChange?.(0, duration)
-    }
-  }, [duration, onRegionChange])
-
-  // Encode audio buffer to MP3
-  const encodeToMP3 = useCallback((audioBuffer: AudioBuffer): Blob => {
-    if (!lamejsModule) {
-      throw new Error('MP3 кодировщик не загружен')
+      const width = region.end - region.start
+      let newStart = time - width / 2
+      newStart = Math.max(0, Math.min(duration - width, newStart))
+      setRegion({ start: newStart, end: newStart + width })
     }
 
-    const mp3encoder = new lamejsModule.Mp3Encoder(1, audioBuffer.sampleRate, 128)
-    const samples = audioBuffer.getChannelData(0)
-    const sampleBlockSize = 1152
-    const mp3Data: Int8Array[] = []
+    onRegionSelect?.(region.start, region.end)
+  }
 
-    const samples16 = new Int16Array(samples.length)
-    for (let i = 0; i < samples.length; i++) {
-      const s = Math.max(-1, Math.min(1, samples[i]))
-      samples16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+  const handleCanvasMouseUp = () => {
+    setIsDragging(null)
+    if (region && onRegionSelect) {
+      onRegionSelect(region.start, region.end)
     }
+  }
 
-    for (let i = 0; i < samples16.length; i += sampleBlockSize) {
-      const chunk = samples16.subarray(i, i + sampleBlockSize)
-      const mp3buf = mp3encoder.encodeBuffer(chunk)
-      if (mp3buf.length > 0) {
-        mp3Data.push(mp3buf)
-      }
-    }
+  // Zoom controls
+  const handleZoomIn = () => setZoom(Math.min(10, zoom + 1))
+  const handleZoomOut = () => setZoom(Math.max(1, zoom - 1))
 
-    const mp3buf = mp3encoder.flush()
-    if (mp3buf.length > 0) {
-      mp3Data.push(mp3buf)
-    }
+  // Format time
+  const formatTime = (time: number): string => {
+    const mins = Math.floor(time / 60)
+    const secs = Math.floor(time % 60)
+    return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
 
-    const totalLength = mp3Data.reduce((acc, arr) => acc + arr.length, 0)
-    const result = new Uint8Array(totalLength)
-    let offset = 0
-    for (const chunk of mp3Data) {
-      result.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.length), offset)
-      offset += chunk.length
-    }
-
-    return new Blob([result], { type: 'audio/mp3' })
-  }, [])
-
-  const trimAudio = useCallback(async () => {
-    if (!audioBufferRef.current || !region) {
-      console.log('No audio buffer or region')
-      return
-    }
+  // Encode selected region to MP3
+  const encodeRegionToMp3 = async (): Promise<Blob | null> => {
+    if (!audioBuffer || !region) return null
 
     setIsEncoding(true)
-    setError(null)
-
     try {
-      const audioBuffer = audioBufferRef.current
-      const sampleRate = audioBuffer.sampleRate
-      const startSample = Math.floor(region.start * sampleRate)
-      const endSample = Math.floor(region.end * sampleRate)
-      const numSamples = endSample - startSample
+      const startSample = Math.floor(region.start * audioBuffer.sampleRate)
+      const endSample = Math.floor(region.end * audioBuffer.sampleRate)
+      const length = endSample - startSample
 
-      // Create new buffer for trimmed audio (mono)
-      const offlineContext = new OfflineAudioContext(1, numSamples, sampleRate)
-      const newBuffer = offlineContext.createBuffer(1, numSamples, sampleRate)
-      const destData = newBuffer.getChannelData(0)
+      // Create a new buffer for the selected region
+      const offlineContext = new OfflineAudioContext(
+        audioBuffer.numberOfChannels,
+        length,
+        audioBuffer.sampleRate
+      )
 
-      if (audioBuffer.numberOfChannels >= 2) {
-        const leftChannel = audioBuffer.getChannelData(0)
-        const rightChannel = audioBuffer.getChannelData(1)
-        for (let i = 0; i < numSamples; i++) {
-          destData[i] = (leftChannel[startSample + i] + rightChannel[startSample + i]) / 2
-        }
-      } else {
-        const sourceData = audioBuffer.getChannelData(0)
-        for (let i = 0; i < numSamples; i++) {
+      const newBuffer = offlineContext.createBuffer(
+        audioBuffer.numberOfChannels,
+        length,
+        audioBuffer.sampleRate
+      )
+
+      for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+        const sourceData = audioBuffer.getChannelData(channel)
+        const destData = newBuffer.getChannelData(channel)
+        for (let i = 0; i < length; i++) {
           destData[i] = sourceData[startSample + i]
         }
       }
 
-      const mp3Blob = encodeToMP3(newBuffer)
-      onTrimmedAudio?.(mp3Blob, region.start, region.end)
-    } catch (err: any) {
-      console.error('Error encoding MP3:', err)
-      setError(err.message || 'Ошибка кодирования MP3')
+      // Convert to MP3 using lamejs
+      const mp3Blob = await encodeBufferToMp3(newBuffer)
+      
+      if (mp3Blob && onRegionEncoded) {
+        onRegionEncoded(mp3Blob, region.start, region.end)
+      }
+
+      return mp3Blob
+    } catch (error) {
+      console.error('Error encoding MP3:', error)
+      throw error
     } finally {
       setIsEncoding(false)
     }
-  }, [region, encodeToMP3, onTrimmedAudio])
+  }
 
-  const toggleMute = useCallback(() => {
-    const audio = audioRef.current
-    if (audio) {
-      audio.muted = !isMuted
-      setIsMuted(!isMuted)
+  // Encode AudioBuffer to MP3
+  const encodeBufferToMp3 = async (buffer: AudioBuffer): Promise<Blob> => {
+    return new Promise((resolve, reject) => {
+      try {
+        if (!lamejs) {
+          // Fallback to WAV if lamejs not loaded
+          const wavBlob = encodeBufferToWav(buffer)
+          resolve(wavBlob)
+          return
+        }
+
+        const channels = buffer.numberOfChannels
+        const sampleRate = buffer.sampleRate
+        const kbps = 128
+
+        // @ts-ignore
+        const mp3encoder = new lamejs.Mp3Encoder(channels, sampleRate, kbps)
+        const mp3Data: Int8Array[] = []
+
+        const left = buffer.getChannelData(0)
+        const right = channels > 1 ? buffer.getChannelData(1) : left
+
+        // Convert float samples to Int16
+        const leftInt = new Int16Array(left.length)
+        const rightInt = new Int16Array(right.length)
+
+        for (let i = 0; i < left.length; i++) {
+          leftInt[i] = Math.max(-32768, Math.min(32767, Math.floor(left[i] * 32767)))
+          rightInt[i] = Math.max(-32768, Math.min(32767, Math.floor(right[i] * 32767)))
+        }
+
+        // Encode in chunks
+        const blockSize = 1152
+        for (let i = 0; i < leftInt.length; i += blockSize) {
+          const leftChunk = leftInt.subarray(i, i + blockSize)
+          const rightChunk = rightInt.subarray(i, i + blockSize)
+          let mp3buf: Int8Array
+
+          if (channels > 1) {
+            mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk)
+          } else {
+            mp3buf = mp3encoder.encodeBuffer(leftChunk)
+          }
+
+          if (mp3buf.length > 0) {
+            mp3Data.push(mp3buf)
+          }
+        }
+
+        // Flush remaining
+        const remaining = mp3encoder.flush()
+        if (remaining.length > 0) {
+          mp3Data.push(remaining)
+        }
+
+        // Combine all MP3 data
+        const totalLength = mp3Data.reduce((acc, arr) => acc + arr.length, 0)
+        const mp3Combined = new Uint8Array(totalLength)
+        let offset = 0
+        for (const chunk of mp3Data) {
+          mp3Combined.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.length), offset)
+          offset += chunk.length
+        }
+
+        resolve(new Blob([mp3Combined], { type: 'audio/mp3' }))
+      } catch (err) {
+        console.error('MP3 encoding failed, falling back to WAV:', err)
+        // Fallback to WAV
+        const wavBlob = encodeBufferToWav(buffer)
+        resolve(wavBlob)
+      }
+    })
+  }
+
+  // Fallback: Encode to WAV
+  const encodeBufferToWav = (buffer: AudioBuffer): Blob => {
+    const numChannels = buffer.numberOfChannels
+    const sampleRate = buffer.sampleRate
+    const format = 1 // PCM
+    const bitDepth = 16
+
+    const bytesPerSample = bitDepth / 8
+    const blockAlign = numChannels * bytesPerSample
+    const byteRate = sampleRate * blockAlign
+    const dataSize = buffer.length * blockAlign
+    const headerSize = 44
+    const totalSize = headerSize + dataSize
+
+    const arrayBuffer = new ArrayBuffer(totalSize)
+    const view = new DataView(arrayBuffer)
+
+    // RIFF header
+    writeString(view, 0, 'RIFF')
+    view.setUint32(4, totalSize - 8, true)
+    writeString(view, 8, 'WAVE')
+
+    // fmt chunk
+    writeString(view, 12, 'fmt ')
+    view.setUint32(16, 16, true) // chunk size
+    view.setUint16(20, format, true)
+    view.setUint16(22, numChannels, true)
+    view.setUint32(24, sampleRate, true)
+    view.setUint32(28, byteRate, true)
+    view.setUint16(32, blockAlign, true)
+    view.setUint16(34, bitDepth, true)
+
+    // data chunk
+    writeString(view, 36, 'data')
+    view.setUint32(40, dataSize, true)
+
+    // Write samples
+    const channels = []
+    for (let i = 0; i < numChannels; i++) {
+      channels.push(buffer.getChannelData(i))
     }
-  }, [isMuted])
 
-  const skipBackward = useCallback(() => seekTo(currentTime - 5), [currentTime, seekTo])
-  const skipForward = useCallback(() => seekTo(currentTime + 5), [currentTime, seekTo])
+    let offset = 44
+    for (let i = 0; i < buffer.length; i++) {
+      for (let channel = 0; channel < numChannels; channel++) {
+        const sample = Math.max(-1, Math.min(1, channels[channel][i]))
+        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF
+        view.setInt16(offset, intSample, true)
+        offset += 2
+      }
+    }
 
-  if (!audioUrl) {
-    return (
-      <div className="flex items-center justify-center h-48 bg-slate-800/50 rounded-xl border border-slate-700">
-        <p className="text-slate-500">Загрузите аудиофайл для редактирования</p>
-      </div>
-    )
+    return new Blob([arrayBuffer], { type: 'audio/wav' })
   }
 
-  if (isLoading) {
-    return (
-      <div className="flex flex-col items-center justify-center h-48 bg-slate-800/50 rounded-xl border border-slate-700 space-y-4">
-        <Loader2 className="w-10 h-10 text-emerald-400 animate-spin" />
-        <p className="text-white font-medium">Загрузка аудио...</p>
-        <div className="w-48">
-          <Progress value={loadProgress} className="h-2" />
-        </div>
-        <p className="text-slate-400 text-sm">{loadProgress}%</p>
-      </div>
-    )
+  const writeString = (view: DataView, offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i))
+    }
   }
 
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center h-48 bg-slate-800/50 rounded-xl border border-red-500/50 space-y-4">
-        <AlertCircle className="w-10 h-10 text-red-400" />
-        <p className="text-red-400 font-medium">{error}</p>
-        <Button variant="outline" onClick={() => setError(null)}>
-          Попробовать снова
-        </Button>
-      </div>
-    )
+  // Download MP3
+  const handleDownloadMp3 = async () => {
+    const blob = await encodeRegionToMp3()
+    if (!blob) return
+
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const ext = blob.type === 'audio/mp3' ? 'mp3' : 'wav'
+    a.download = `audio_selection_${formatTime(region?.start || 0)}-${formatTime(region?.end || 0)}.${ext}`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Expose encode function
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      (window as any).__encodeRegionToMp3 = encodeRegionToMp3
+    }
+  }, [audioBuffer, region])
+
+  if (!audioUrl || !audioBuffer) {
+    return null
   }
 
   return (
-    <div className="space-y-4 relative">
+    <div ref={containerRef} className="bg-slate-800 rounded-lg p-4 space-y-4">
+      {/* Hidden audio element */}
       <audio ref={audioRef} src={audioUrl} preload="metadata" />
 
-      {isReady && (
-        <div className="flex items-center justify-center gap-2 text-emerald-400 mb-2">
-          <CheckCircle className="w-4 h-4" />
-          <span className="text-sm">Аудио готово к редактированию</span>
-        </div>
-      )}
-
-      {/* Encoding overlay */}
-      {isEncoding && (
-        <div className="absolute inset-0 bg-slate-900/90 flex flex-col items-center justify-center z-20 rounded-xl">
-          <Loader2 className="w-8 h-8 text-emerald-400 animate-spin mb-2" />
-          <p className="text-white">Кодирование MP3...</p>
-        </div>
-      )}
-
-      <div ref={containerRef} className="relative bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">
+      {/* Waveform canvas */}
+      <div className="relative overflow-hidden rounded-lg border border-slate-600">
         <canvas
           ref={canvasRef}
           className="w-full h-32 cursor-crosshair"
-          onClick={handleCanvasClick}
+          onClick={handleSeek}
           onMouseDown={handleCanvasMouseDown}
           onMouseMove={handleCanvasMouseMove}
           onMouseUp={handleCanvasMouseUp}
           onMouseLeave={handleCanvasMouseUp}
         />
-
-        {region && (
-          <div className="absolute top-2 left-2 flex gap-2">
-            <Badge variant="secondary" className="bg-white/90 text-slate-800 font-medium shadow-sm">
-              {formatTimeFull(region.start)} - {formatTimeFull(region.end)}
-            </Badge>
-            <Badge variant="secondary" className="bg-emerald-500/90 text-white font-medium shadow-sm">
-              {formatTimeFull(region.end - region.start)} выбрано
-            </Badge>
-          </div>
-        )}
       </div>
 
-      <div className="px-1">
-        <Slider
-          value={[currentTime]}
-          min={0}
-          max={duration || 100}
-          step={0.1}
-          onValueChange={([v]) => seekTo(v)}
-          className="cursor-pointer"
-        />
-        <div className="flex justify-between text-xs text-slate-300 mt-1">
-          <span>{formatTimeFull(currentTime)}</span>
-          <span>{formatTimeFull(duration)}</span>
-        </div>
+      {/* Timeline */}
+      <div className="flex justify-between text-xs text-slate-400 px-2">
+        <span>{formatTime(currentTime)}</span>
+        <span>{formatTime(duration)}</span>
       </div>
 
-      <div className="flex flex-wrap items-center justify-center gap-2">
-        <div className="flex items-center gap-1 mr-4">
-          <Button variant="outline" size="icon" onClick={zoomOut} disabled={zoom <= 1}>
-            <ZoomOut className="w-4 h-4" />
-          </Button>
-          <Badge variant="secondary" className="min-w-[3rem] justify-center">
-            {zoom.toFixed(1)}x
-          </Badge>
-          <Button variant="outline" size="icon" onClick={zoomIn} disabled={zoom >= 10}>
-            <ZoomIn className="w-4 h-4" />
-          </Button>
-        </div>
-
-        <div className="flex items-center gap-1">
-          <Button variant="outline" size="icon" onClick={skipBackward}>
-            <SkipBack className="w-4 h-4" />
+      {/* Controls */}
+      <div className="flex flex-wrap items-center gap-4">
+        {/* Playback buttons */}
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="icon" onClick={skipBack} className="h-8 w-8">
+            <SkipBack className="h-4 w-4" />
           </Button>
           <Button
             onClick={togglePlay}
-            className="w-12 h-12 bg-emerald-500 hover:bg-emerald-600"
+            className="h-10 w-10 rounded-full bg-emerald-500 hover:bg-emerald-600"
           >
-            {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
+            {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 ml-0.5" />}
           </Button>
-          <Button variant="outline" size="icon" onClick={skipForward}>
-            <SkipForward className="w-4 h-4" />
+          <Button variant="outline" size="icon" onClick={skipForward} className="h-8 w-8">
+            <SkipForward className="h-4 w-4" />
           </Button>
         </div>
 
-        <Button variant="outline" size="icon" onClick={toggleMute} className="ml-2">
-          {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-        </Button>
-
-        <div className="flex items-center gap-1 ml-4">
-          <Button variant="outline" size="sm" onClick={resetRegion}>
-            <RotateCcw className="w-4 h-4 mr-1" />
-            Сбросить
+        {/* Volume */}
+        <div className="flex items-center gap-2 flex-1 max-w-32">
+          <Button variant="ghost" size="icon" onClick={toggleMute} className="h-8 w-8">
+            {isMuted || volume === 0 ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={trimAudio}
-            disabled={!region || isEncoding || !lamejsModule}
-          >
-            {isEncoding ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-                Кодирование...
-              </>
-            ) : (
-              <>
-                <Scissors className="w-4 h-4 mr-1" />
-                Вырезать MP3
-              </>
-            )}
+          <Slider
+            value={[isMuted ? 0 : volume]}
+            max={1}
+            step={0.1}
+            onValueChange={handleVolumeChange}
+            className="flex-1"
+          />
+        </div>
+
+        {/* Zoom */}
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="icon" onClick={handleZoomOut} className="h-8 w-8">
+            <ZoomOut className="h-4 w-4" />
+          </Button>
+          <span className="text-sm text-slate-400 w-12 text-center">{zoom}x</span>
+          <Button variant="outline" size="icon" onClick={handleZoomIn} className="h-8 w-8">
+            <ZoomIn className="h-4 w-4" />
           </Button>
         </div>
       </div>
 
-      <p className="text-center text-xs text-slate-400">
-        Перетащите края выделенной области для выбора участка • MP3 128kbps
-      </p>
+      {/* Region info and actions */}
+      {region && region.end - region.start > 0.1 && (
+        <div className="flex flex-wrap items-center justify-between gap-4 bg-slate-700/50 rounded-lg p-3">
+          <div className="text-sm">
+            <span className="text-slate-400">Выбрано: </span>
+            <span className="text-blue-400 font-mono">
+              {formatTime(region.start)} - {formatTime(region.end)}
+            </span>
+            <span className="text-slate-500 ml-2">
+              ({((region.end - region.start) / 60).toFixed(2)} мин)
+            </span>
+          </div>
+          <Button
+            onClick={handleDownloadMp3}
+            disabled={isEncoding}
+            className="bg-blue-500 hover:bg-blue-600"
+          >
+            <Scissors className="h-4 w-4 mr-2" />
+            {isEncoding ? 'Кодирование...' : 'Вырезать MP3'}
+          </Button>
+        </div>
+      )}
+
+      {/* Instructions */}
+      <div className="text-xs text-slate-500 text-center">
+        Кликните и перетащите на волновой форме для выбора фрагмента
+      </div>
     </div>
   )
 }
