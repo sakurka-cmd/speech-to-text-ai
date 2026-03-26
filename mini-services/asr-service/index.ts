@@ -16,6 +16,7 @@ const io = new Server(httpServer, {
 })
 
 const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || 'http://localhost:5000'
+const WHISPER_TIMEOUT = parseInt(process.env.WHISPER_TIMEOUT || '7200000', 10) // 2 hours default
 
 interface UploadSession {
   id: string
@@ -95,15 +96,25 @@ async function transcribeWithWhisper(
     const contentType = contentTypes[ext] || 'audio/wav'
     
     console.log(`[${jobId}] Sending ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB to Whisper...`)
+    console.log(`[${jobId}] Timeout set to ${WHISPER_TIMEOUT / 1000 / 60} minutes`)
 
     const formData = new FormData()
     formData.append('file', new Blob([audioBuffer], { type: contentType }), fileName)
 
-    // No timeout - let it run as long as needed
+    // Create AbortController with timeout
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      console.log(`[${jobId}] Timeout after ${WHISPER_TIMEOUT}ms, aborting...`)
+      controller.abort()
+    }, WHISPER_TIMEOUT)
+
     const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
       method: 'POST',
-      body: formData
+      body: formData,
+      signal: controller.signal
     })
+
+    clearTimeout(timeoutId)
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
@@ -215,6 +226,7 @@ const PORT = 3003
 httpServer.listen(PORT, () => {
   console.log(`ASR proxy on port ${PORT}`)
   console.log(`Whisper: ${WHISPER_SERVICE_URL}`)
+  console.log(`Timeout: ${WHISPER_TIMEOUT / 1000 / 60} minutes`)
 })
 
 process.on('SIGTERM', () => httpServer.close(() => process.exit(0)))
