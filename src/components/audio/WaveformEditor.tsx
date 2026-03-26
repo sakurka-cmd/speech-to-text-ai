@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
 import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
 import {
   Play,
   Pause,
@@ -12,10 +13,11 @@ import {
   ZoomIn,
   ZoomOut,
   Scissors,
-  Download,
   RotateCcw,
   Volume2,
-  VolumeX
+  VolumeX,
+  Loader2,
+  CheckCircle
 } from 'lucide-react'
 
 interface WaveformEditorProps {
@@ -23,6 +25,8 @@ interface WaveformEditorProps {
   audioUrl: string | null
   onRegionChange?: (start: number, end: number) => void
   onTrimmedAudio?: (blob: Blob, start: number, end: number) => void
+  onLoadingChange?: (loading: boolean) => void
+  onLoadedChange?: (loaded: boolean) => void
 }
 
 interface AudioRegion {
@@ -34,7 +38,9 @@ export default function WaveformEditor({
   audioFile,
   audioUrl,
   onRegionChange,
-  onTrimmedAudio
+  onTrimmedAudio,
+  onLoadingChange,
+  onLoadedChange
 }: WaveformEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -51,9 +57,19 @@ export default function WaveformEditor({
   const [waveformData, setWaveformData] = useState<number[]>([])
   const [isMuted, setIsMuted] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const [loadProgress, setLoadProgress] = useState(0)
+  const [isReady, setIsReady] = useState(false)
 
-  const animationRef = useRef<number>()
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // Notify parent of loading state changes
+  useEffect(() => {
+    onLoadingChange?.(isLoading)
+  }, [isLoading, onLoadingChange])
+
+  useEffect(() => {
+    onLoadedChange?.(isReady)
+  }, [isReady, onLoadedChange])
 
   // Load and decode audio
   useEffect(() => {
@@ -62,22 +78,39 @@ export default function WaveformEditor({
       setDuration(0)
       setCurrentTime(0)
       setRegion(null)
+      setLoadProgress(0)
+      setIsReady(false)
       audioBufferRef.current = null
       return
     }
 
     const loadAudio = async () => {
       setIsLoading(true)
+      setLoadProgress(0)
+      setIsReady(false)
+
       try {
+        setLoadProgress(10)
+
         const response = await fetch(audioUrl)
+        const contentLength = response.headers.get('content-length')
+        const total = contentLength ? parseInt(contentLength, 10) : 0
+
+        // Simulate progress for fetch
+        setLoadProgress(20)
+
         const arrayBuffer = await response.arrayBuffer()
+        setLoadProgress(40)
 
         if (!audioContextRef.current) {
           audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)()
         }
 
+        setLoadProgress(50)
         const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer)
         audioBufferRef.current = audioBuffer
+
+        setLoadProgress(70)
 
         // Generate waveform data
         const channelData = audioBuffer.getChannelData(0)
@@ -93,6 +126,8 @@ export default function WaveformEditor({
           waveform.push(sum / blockSize)
         }
 
+        setLoadProgress(90)
+
         // Normalize
         const max = Math.max(...waveform)
         const normalized = waveform.map(v => v / max)
@@ -101,6 +136,10 @@ export default function WaveformEditor({
         setDuration(audioBuffer.duration)
         setCurrentTime(0)
         setRegion({ start: 0, end: audioBuffer.duration })
+
+        setLoadProgress(100)
+        setIsReady(true)
+
       } catch (error) {
         console.error('Error loading audio:', error)
       } finally {
@@ -459,18 +498,35 @@ export default function WaveformEditor({
     )
   }
 
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-48 bg-slate-800/50 rounded-xl border border-slate-700 space-y-4">
+        <Loader2 className="w-10 h-10 text-emerald-400 animate-spin" />
+        <p className="text-white font-medium">Загрузка аудио...</p>
+        <div className="w-48">
+          <Progress value={loadProgress} className="h-2" />
+        </div>
+        <p className="text-slate-400 text-sm">{loadProgress}%</p>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-4">
       {/* Hidden audio element */}
       <audio ref={audioRef} src={audioUrl} preload="metadata" />
 
+      {/* Ready indicator */}
+      {isReady && (
+        <div className="flex items-center justify-center gap-2 text-emerald-400 mb-2">
+          <CheckCircle className="w-4 h-4" />
+          <span className="text-sm">Аудио готово к редактированию</span>
+        </div>
+      )}
+
       {/* Waveform Canvas */}
       <div ref={containerRef} className="relative bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">
-        {isLoading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-slate-800/80 z-10">
-            <div className="animate-spin w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full" />
-          </div>
-        )}
         <canvas
           ref={canvasRef}
           className="w-full h-32 cursor-crosshair"
