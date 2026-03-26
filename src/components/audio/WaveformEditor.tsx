@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
 import { Badge } from '@/components/ui/badge'
@@ -17,11 +17,9 @@ import {
   Volume2,
   VolumeX,
   Loader2,
-  CheckCircle
+  CheckCircle,
+  AlertCircle
 } from 'lucide-react'
-
-// @ts-ignore - lamejs doesn't have proper types
-import lamejs from 'lamejs'
 
 interface WaveformEditorProps {
   audioFile: File | null
@@ -36,6 +34,9 @@ interface AudioRegion {
   start: number
   end: number
 }
+
+// Store lamejs module reference
+let lamejsModule: any = null
 
 export default function WaveformEditor({
   audioFile,
@@ -63,8 +64,22 @@ export default function WaveformEditor({
   const [loadProgress, setLoadProgress] = useState(0)
   const [isReady, setIsReady] = useState(false)
   const [isEncoding, setIsEncoding] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // Load lamejs dynamically
+  useEffect(() => {
+    if (!lamejsModule) {
+      import('lamejs').then((module) => {
+        lamejsModule = module.default || module
+        console.log('lamejs loaded successfully')
+      }).catch((err) => {
+        console.error('Failed to load lamejs:', err)
+        setError('Не удалось загрузить кодировщик MP3')
+      })
+    }
+  }, [])
 
   // Notify parent of loading state changes
   useEffect(() => {
@@ -84,6 +99,7 @@ export default function WaveformEditor({
       setRegion(null)
       setLoadProgress(0)
       setIsReady(false)
+      setError(null)
       audioBufferRef.current = null
       return
     }
@@ -92,14 +108,12 @@ export default function WaveformEditor({
       setIsLoading(true)
       setLoadProgress(0)
       setIsReady(false)
+      setError(null)
 
       try {
         setLoadProgress(10)
 
         const response = await fetch(audioUrl)
-        const contentLength = response.headers.get('content-length')
-        const total = contentLength ? parseInt(contentLength, 10) : 0
-
         setLoadProgress(20)
 
         const arrayBuffer = await response.arrayBuffer()
@@ -112,7 +126,6 @@ export default function WaveformEditor({
         setLoadProgress(50)
         const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer)
         audioBufferRef.current = audioBuffer
-
         setLoadProgress(70)
 
         // Generate waveform data
@@ -132,7 +145,7 @@ export default function WaveformEditor({
         setLoadProgress(90)
 
         const max = Math.max(...waveform)
-        const normalized = waveform.map(v => v / max)
+        const normalized = waveform.map(v => max > 0 ? v / max : 0)
 
         setWaveformData(normalized)
         setDuration(audioBuffer.duration)
@@ -142,8 +155,9 @@ export default function WaveformEditor({
         setLoadProgress(100)
         setIsReady(true)
 
-      } catch (error) {
-        console.error('Error loading audio:', error)
+      } catch (err) {
+        console.error('Error loading audio:', err)
+        setError('Ошибка загрузки аудио')
       } finally {
         setIsLoading(false)
       }
@@ -199,7 +213,7 @@ export default function WaveformEditor({
     if (region && duration > 0) {
       const startX = ((region.start / duration) * width - zoomOffset * width) * zoom
       const endX = ((region.end / duration) * width - zoomOffset * width) * zoom
-      const regionWidth = endX - startX
+      const regionWidth = Math.max(0, endX - startX)
 
       ctx.fillStyle = 'rgba(16, 185, 129, 0.3)'
       ctx.fillRect(startX, 0, regionWidth, height)
@@ -228,7 +242,7 @@ export default function WaveformEditor({
       ctx.stroke()
     }
 
-    ctx.fillStyle = '#64748b'
+    ctx.fillStyle = '#94a3b8'
     ctx.font = '11px monospace'
     const markerInterval = getMarkerInterval(duration / zoom)
     for (let t = 0; t <= duration; t += markerInterval) {
@@ -279,7 +293,7 @@ export default function WaveformEditor({
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
-  const togglePlay = () => {
+  const togglePlay = useCallback(() => {
     const audio = audioRef.current
     if (!audio) return
 
@@ -289,16 +303,16 @@ export default function WaveformEditor({
       audio.play()
     }
     setIsPlaying(!isPlaying)
-  }
+  }, [isPlaying])
 
-  const seekTo = (time: number) => {
+  const seekTo = useCallback((time: number) => {
     const audio = audioRef.current
     if (!audio) return
     audio.currentTime = Math.max(0, Math.min(time, duration))
     setCurrentTime(audio.currentTime)
-  }
+  }, [duration])
 
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas || duration === 0) return
 
@@ -306,9 +320,9 @@ export default function WaveformEditor({
     const x = e.clientX - rect.left
     const time = ((x / rect.width + zoomOffset) / zoom) * duration
     seekTo(time)
-  }
+  }, [duration, zoom, zoomOffset, seekTo])
 
-  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas || !region || duration === 0) return
 
@@ -326,9 +340,9 @@ export default function WaveformEditor({
     } else if (x > startPixel && x < endPixel) {
       setIsDragging('move')
     }
-  }
+  }, [region, duration, zoom, zoomOffset])
 
-  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDragging || !region || duration === 0) return
 
     const canvas = canvasRef.current
@@ -366,37 +380,38 @@ export default function WaveformEditor({
       setRegion(newRegion)
       onRegionChange?.(newStart, newEnd)
     }
-  }
+  }, [isDragging, region, duration, zoom, zoomOffset, onRegionChange])
 
-  const handleCanvasMouseUp = () => setIsDragging(null)
+  const handleCanvasMouseUp = useCallback(() => setIsDragging(null), [])
 
-  const zoomIn = () => setZoom(z => Math.min(10, z * 1.5))
-  const zoomOut = () => setZoom(z => Math.max(1, z / 1.5))
+  const zoomIn = useCallback(() => setZoom(z => Math.min(10, z * 1.5)), [])
+  const zoomOut = useCallback(() => setZoom(z => Math.max(1, z / 1.5)), [])
 
-  const resetRegion = () => {
+  const resetRegion = useCallback(() => {
     if (duration > 0) {
       const newRegion = { start: 0, end: duration }
       setRegion(newRegion)
       onRegionChange?.(0, duration)
     }
-  }
+  }, [duration, onRegionChange])
 
-  // Encode audio buffer to MP3 using lamejs
-  const encodeToMP3 = (audioBuffer: AudioBuffer): Blob => {
-    const mp3encoder = new lamejs.Mp3Encoder(1, audioBuffer.sampleRate, 128) // mono, sample rate, kbps
+  // Encode audio buffer to MP3
+  const encodeToMP3 = useCallback((audioBuffer: AudioBuffer): Blob => {
+    if (!lamejsModule) {
+      throw new Error('MP3 кодировщик не загружен')
+    }
 
+    const mp3encoder = new lamejsModule.Mp3Encoder(1, audioBuffer.sampleRate, 128)
     const samples = audioBuffer.getChannelData(0)
-    const sampleBlockSize = 1152 // must be multiple of 576 for lamejs
+    const sampleBlockSize = 1152
     const mp3Data: Int8Array[] = []
 
-    // Convert float samples to Int16
     const samples16 = new Int16Array(samples.length)
     for (let i = 0; i < samples.length; i++) {
       const s = Math.max(-1, Math.min(1, samples[i]))
       samples16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
     }
 
-    // Encode in blocks
     for (let i = 0; i < samples16.length; i += sampleBlockSize) {
       const chunk = samples16.subarray(i, i + sampleBlockSize)
       const mp3buf = mp3encoder.encodeBuffer(chunk)
@@ -405,13 +420,11 @@ export default function WaveformEditor({
       }
     }
 
-    // Finish encoding
     const mp3buf = mp3encoder.flush()
     if (mp3buf.length > 0) {
       mp3Data.push(mp3buf)
     }
 
-    // Combine all MP3 data
     const totalLength = mp3Data.reduce((acc, arr) => acc + arr.length, 0)
     const result = new Uint8Array(totalLength)
     let offset = 0
@@ -421,12 +434,16 @@ export default function WaveformEditor({
     }
 
     return new Blob([result], { type: 'audio/mp3' })
-  }
+  }, [])
 
-  const trimAudio = async () => {
-    if (!audioBufferRef.current || !region) return
+  const trimAudio = useCallback(async () => {
+    if (!audioBufferRef.current || !region) {
+      console.log('No audio buffer or region')
+      return
+    }
 
     setIsEncoding(true)
+    setError(null)
 
     try {
       const audioBuffer = audioBufferRef.current
@@ -434,14 +451,12 @@ export default function WaveformEditor({
       const startSample = Math.floor(region.start * sampleRate)
       const endSample = Math.floor(region.end * sampleRate)
       const numSamples = endSample - startSample
-      const numChannels = 1 // Force mono for MP3
 
       // Create new buffer for trimmed audio (mono)
-      const offlineContext = new OfflineAudioContext(numChannels, numSamples, sampleRate)
-      const newBuffer = offlineContext.createBuffer(numChannels, numSamples, sampleRate)
-
-      // Copy audio data (mix to mono if stereo)
+      const offlineContext = new OfflineAudioContext(1, numSamples, sampleRate)
+      const newBuffer = offlineContext.createBuffer(1, numSamples, sampleRate)
       const destData = newBuffer.getChannelData(0)
+
       if (audioBuffer.numberOfChannels >= 2) {
         const leftChannel = audioBuffer.getChannelData(0)
         const rightChannel = audioBuffer.getChannelData(1)
@@ -455,26 +470,26 @@ export default function WaveformEditor({
         }
       }
 
-      // Encode to MP3
       const mp3Blob = encodeToMP3(newBuffer)
       onTrimmedAudio?.(mp3Blob, region.start, region.end)
-    } catch (error) {
-      console.error('Error encoding MP3:', error)
+    } catch (err: any) {
+      console.error('Error encoding MP3:', err)
+      setError(err.message || 'Ошибка кодирования MP3')
     } finally {
       setIsEncoding(false)
     }
-  }
+  }, [region, encodeToMP3, onTrimmedAudio])
 
-  const toggleMute = () => {
+  const toggleMute = useCallback(() => {
     const audio = audioRef.current
     if (audio) {
       audio.muted = !isMuted
       setIsMuted(!isMuted)
     }
-  }
+  }, [isMuted])
 
-  const skipBackward = () => seekTo(currentTime - 5)
-  const skipForward = () => seekTo(currentTime + 5)
+  const skipBackward = useCallback(() => seekTo(currentTime - 5), [currentTime, seekTo])
+  const skipForward = useCallback(() => seekTo(currentTime + 5), [currentTime, seekTo])
 
   if (!audioUrl) {
     return (
@@ -497,8 +512,20 @@ export default function WaveformEditor({
     )
   }
 
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-48 bg-slate-800/50 rounded-xl border border-red-500/50 space-y-4">
+        <AlertCircle className="w-10 h-10 text-red-400" />
+        <p className="text-red-400 font-medium">{error}</p>
+        <Button variant="outline" onClick={() => setError(null)}>
+          Попробовать снова
+        </Button>
+      </div>
+    )
+  }
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 relative">
       <audio ref={audioRef} src={audioUrl} preload="metadata" />
 
       {isReady && (
@@ -510,7 +537,7 @@ export default function WaveformEditor({
 
       {/* Encoding overlay */}
       {isEncoding && (
-        <div className="absolute inset-0 bg-slate-900/80 flex flex-col items-center justify-center z-10 rounded-xl">
+        <div className="absolute inset-0 bg-slate-900/90 flex flex-col items-center justify-center z-20 rounded-xl">
           <Loader2 className="w-8 h-8 text-emerald-400 animate-spin mb-2" />
           <p className="text-white">Кодирование MP3...</p>
         </div>
@@ -572,8 +599,6 @@ export default function WaveformEditor({
             <SkipBack className="w-4 h-4" />
           </Button>
           <Button
-            variant="default"
-            size="icon"
             onClick={togglePlay}
             className="w-12 h-12 bg-emerald-500 hover:bg-emerald-600"
           >
@@ -597,7 +622,7 @@ export default function WaveformEditor({
             variant="outline"
             size="sm"
             onClick={trimAudio}
-            disabled={!region || isEncoding}
+            disabled={!region || isEncoding || !lamejsModule}
           >
             {isEncoding ? (
               <>
