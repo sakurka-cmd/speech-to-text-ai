@@ -24,8 +24,9 @@ import {
   Wifi,
   WifiOff,
   AlertTriangle,
-  Play,
-  Scissors
+  Scissors,
+  ArrowRight,
+  CheckCircle
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 import WaveformEditor from '@/components/audio/WaveformEditor'
@@ -54,6 +55,9 @@ export default function Home() {
   const [uploadProgress, setUploadProgress] = useState(0)
   const [file, setFile] = useState<File | null>(null)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [audioLoaded, setAudioLoaded] = useState(false)
+  const [audioLoading, setAudioLoading] = useState(false)
+  const [audioDuration, setAudioDuration] = useState(0)
   const [result, setResult] = useState<TranscriptionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
@@ -64,6 +68,7 @@ export default function Home() {
   const [trimmedBlob, setTrimmedBlob] = useState<Blob | null>(null)
   const [trimmedFileName, setTrimmedFileName] = useState<string>('')
   const [transcriptionMode, setTranscriptionMode] = useState<'full' | 'selection'>('full')
+  const [activeTab, setActiveTab] = useState('upload')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const processingStartTime = useRef<number>(0)
   const { toast } = useToast()
@@ -162,7 +167,7 @@ export default function Home() {
 
     setSocket(newSocket)
     return () => { newSocket.close() }
-  }, [toast])
+  }, [toast, file?.name])
 
   // Cleanup audio URL
   useEffect(() => {
@@ -194,6 +199,12 @@ export default function Home() {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
+  const formatDuration = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
+
   const handleFileSelect = useCallback((selectedFile: File) => {
     const validExtensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.webm', '.mp4', '.mpeg', '.mpga', '.oga']
     const ext = '.' + selectedFile.name.split('.').pop()?.toLowerCase()
@@ -217,8 +228,9 @@ export default function Home() {
     }
 
     setFile(selectedFile)
-    const url = URL.createObjectURL(selectedFile)
-    setAudioUrl(url)
+    setAudioLoaded(false)
+    setAudioLoading(true)
+    setAudioDuration(0)
     setResult(null)
     setError(null)
     setStatus('idle')
@@ -227,6 +239,23 @@ export default function Home() {
     setProcessingTime(0)
     setTrimmedBlob(null)
     setSelectedRegion(null)
+
+    // Create object URL and get duration
+    const url = URL.createObjectURL(selectedFile)
+    setAudioUrl(url)
+
+    // Get audio duration
+    const audio = new Audio()
+    audio.onloadedmetadata = () => {
+      setAudioDuration(audio.duration)
+      setAudioLoaded(true)
+      setAudioLoading(false)
+    }
+    audio.onerror = () => {
+      setAudioLoading(false)
+      toast({ variant: 'destructive', title: 'Ошибка загрузки аудио' })
+    }
+    audio.src = url
   }, [audioUrl, toast])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -372,6 +401,9 @@ export default function Home() {
     }
     setFile(null)
     setAudioUrl(null)
+    setAudioLoaded(false)
+    setAudioLoading(false)
+    setAudioDuration(0)
     setResult(null)
     setError(null)
     setStatus('idle')
@@ -380,6 +412,7 @@ export default function Home() {
     setProcessingTime(0)
     setTrimmedBlob(null)
     setSelectedRegion(null)
+    setActiveTab('upload')
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -424,13 +457,14 @@ export default function Home() {
           </Alert>
         )}
 
-        <Tabs defaultValue="upload" className="space-y-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
           <TabsList className="grid w-full grid-cols-2 bg-slate-800/50">
             <TabsTrigger value="upload" className="data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400">
               <Upload className="w-4 h-4 mr-2" />
               Загрузка
+              {audioLoaded && <CheckCircle className="w-4 h-4 ml-2 text-emerald-400" />}
             </TabsTrigger>
-            <TabsTrigger value="editor" disabled={!audioUrl} className="data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400">
+            <TabsTrigger value="editor" disabled={!audioLoaded} className="data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400">
               <Scissors className="w-4 h-4 mr-2" />
               Редактор
             </TabsTrigger>
@@ -453,11 +487,11 @@ export default function Home() {
                 <div
                   className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all
                 ${isDragging ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-600 hover:border-slate-500'}
-                ${file ? 'border-emerald-500/50 bg-emerald-500/5' : ''}`}
+                ${audioLoaded ? 'border-emerald-500 bg-emerald-500/5' : ''}`}
                   onDrop={handleDrop}
                   onDragOver={handleDragOver}
                   onDragLeave={handleDragLeave}
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={() => !audioLoading && fileInputRef.current?.click()}
                 >
                   <input
                     ref={fileInputRef}
@@ -467,13 +501,43 @@ export default function Home() {
                     onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
                   />
 
-                  {file ? (
-                    <div className="flex items-center justify-center gap-3">
-                      <FileAudio className="w-12 h-12 text-emerald-400" />
-                      <div className="text-left">
-                        <p className="text-white font-medium">{file.name}</p>
-                        <p className="text-slate-400 text-sm">{formatFileSize(file.size)}</p>
+                  {audioLoading ? (
+                    <div className="space-y-3">
+                      <Loader2 className="w-12 h-12 text-emerald-400 mx-auto animate-spin" />
+                      <p className="text-white font-medium">Загрузка аудио...</p>
+                      <Progress value={50} className="h-2 w-48 mx-auto animate-pulse" />
+                    </div>
+                  ) : audioLoaded && file ? (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-center gap-3">
+                        <CheckCircle2 className="w-12 h-12 text-emerald-400" />
+                        <div className="text-left">
+                          <p className="text-white font-medium">{file.name}</p>
+                          <p className="text-slate-400 text-sm">{formatFileSize(file.size)} • {formatDuration(audioDuration)}</p>
+                        </div>
                       </div>
+
+                      {/* Ready indicator */}
+                      <div className="flex items-center justify-center gap-2 text-emerald-400">
+                        <Badge className="bg-emerald-500/20 text-emerald-400 px-4 py-2">
+                          <CheckCircle className="w-4 h-4 mr-2" />
+                          Файл готов к работе
+                        </Badge>
+                      </div>
+
+                      {/* Go to editor button */}
+                      <Button
+                        variant="outline"
+                        className="border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/10"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setActiveTab('editor')
+                        }}
+                      >
+                        <Scissors className="w-4 h-4 mr-2" />
+                        Открыть редактор
+                        <ArrowRight className="w-4 h-4 ml-2" />
+                      </Button>
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -485,6 +549,87 @@ export default function Home() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* Quick actions after upload */}
+            {audioLoaded && (
+              <div className="animate-in fade-in duration-300">
+                <Card className="bg-slate-800/50 border-slate-700">
+                  <CardHeader>
+                    <CardTitle className="text-white flex items-center gap-2">
+                      <Mic className="w-5 h-5 text-emerald-400" />
+                      Распознавание речи
+                    </CardTitle>
+                    <CardDescription className="text-slate-400">
+                      Выберите режим распознавания
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Button
+                        variant={transcriptionMode === 'full' ? 'default' : 'outline'}
+                        onClick={() => setTranscriptionMode('full')}
+                        className={`h-auto py-4 ${transcriptionMode === 'full' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600'}`}
+                      >
+                        <div className="text-left">
+                          <div className="font-medium">Весь файл</div>
+                          <div className="text-xs opacity-70">
+                            {file && `${formatFileSize(file.size)} • ${formatDuration(audioDuration)}`}
+                          </div>
+                        </div>
+                      </Button>
+                      <Button
+                        variant={transcriptionMode === 'selection' ? 'default' : 'outline'}
+                        onClick={() => setTranscriptionMode('selection')}
+                        disabled={!selectedRegion && !trimmedBlob}
+                        className={`h-auto py-4 ${transcriptionMode === 'selection' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600'}`}
+                      >
+                        <div className="text-left">
+                          <div className="font-medium">Выбранный участок</div>
+                          <div className="text-xs opacity-70">
+                            {selectedRegion
+                              ? `${formatTimeShort(selectedRegion.start)} - ${formatTimeShort(selectedRegion.end)}`
+                              : trimmedBlob
+                                ? formatFileSize(trimmedBlob.size)
+                                : 'Выберите в редакторе'}
+                          </div>
+                        </div>
+                      </Button>
+                    </div>
+
+                    <div className="flex gap-3 mt-4">
+                      <Button
+                        onClick={handleTranscribe}
+                        disabled={!file || status === 'processing' || status === 'uploading' || !isConnected}
+                        className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
+                      >
+                        {status === 'uploading' || status === 'processing' ? (
+                          <>
+                            <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                            Обработка...
+                          </>
+                        ) : (
+                          <>
+                            <Mic className="w-5 h-5 mr-2" />
+                            Распознать {transcriptionMode === 'selection' ? 'участок' : 'всё'}
+                          </>
+                        )}
+                      </Button>
+
+                      {file && (
+                        <Button
+                          onClick={handleReset}
+                          variant="outline"
+                          className="border-slate-600 text-slate-300"
+                          disabled={status === 'processing' || status === 'uploading'}
+                        >
+                          <Trash2 className="w-5 h-5" />
+                        </Button>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
           </TabsContent>
 
           {/* Editor Tab */}
@@ -505,6 +650,8 @@ export default function Home() {
                   audioUrl={audioUrl}
                   onRegionChange={handleRegionChange}
                   onTrimmedAudio={handleTrimmedAudio}
+                  onLoadingChange={(loading) => setAudioLoading(loading)}
+                  onLoadedChange={(loaded) => setAudioLoaded(loaded)}
                 />
               </CardContent>
             </Card>
@@ -521,87 +668,20 @@ export default function Home() {
                 </AlertDescription>
               </Alert>
             )}
+
+            {/* Back to upload */}
+            <div className="flex justify-center">
+              <Button
+                variant="outline"
+                className="border-slate-600 text-slate-300"
+                onClick={() => setActiveTab('upload')}
+              >
+                <ArrowRight className="w-4 h-4 mr-2 rotate-180" />
+                Вернуться к распознаванию
+              </Button>
+            </div>
           </TabsContent>
         </Tabs>
-
-        {/* Transcription Mode Selection */}
-        {audioUrl && status === 'idle' && (
-          <Card className="bg-slate-800/50 border-slate-700 mt-6">
-            <CardHeader>
-              <CardTitle className="text-white flex items-center gap-2">
-                <Mic className="w-5 h-5 text-emerald-400" />
-                Распознавание речи
-              </CardTitle>
-              <CardDescription className="text-slate-400">
-                Выберите режим распознавания
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Button
-                  variant={transcriptionMode === 'full' ? 'default' : 'outline'}
-                  onClick={() => setTranscriptionMode('full')}
-                  className={`h-auto py-4 ${transcriptionMode === 'full' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600'}`}
-                >
-                  <div className="text-left">
-                    <div className="font-medium">Весь файл</div>
-                    <div className="text-xs opacity-70">
-                      {file && `${formatFileSize(file.size)}`}
-                    </div>
-                  </div>
-                </Button>
-                <Button
-                  variant={transcriptionMode === 'selection' ? 'default' : 'outline'}
-                  onClick={() => setTranscriptionMode('selection')}
-                  disabled={!selectedRegion && !trimmedBlob}
-                  className={`h-auto py-4 ${transcriptionMode === 'selection' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600'}`}
-                >
-                  <div className="text-left">
-                    <div className="font-medium">Выбранный участок</div>
-                    <div className="text-xs opacity-70">
-                      {selectedRegion
-                        ? `${formatTimeShort(selectedRegion.start)} - ${formatTimeShort(selectedRegion.end)}`
-                        : trimmedBlob
-                          ? formatFileSize(trimmedBlob.size)
-                          : 'Выберите участок'}
-                    </div>
-                  </div>
-                </Button>
-              </div>
-
-              <div className="flex gap-3 mt-4">
-                <Button
-                  onClick={handleTranscribe}
-                  disabled={!file || status === 'processing' || status === 'uploading' || !isConnected}
-                  className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
-                >
-                  {status === 'uploading' || status === 'processing' ? (
-                    <>
-                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                      Обработка...
-                    </>
-                  ) : (
-                    <>
-                      <Mic className="w-5 h-5 mr-2" />
-                      Распознать {transcriptionMode === 'selection' ? 'участок' : 'всё'}
-                    </>
-                  )}
-                </Button>
-
-                {file && (
-                  <Button
-                    onClick={handleReset}
-                    variant="outline"
-                    className="border-slate-600 text-slate-300"
-                    disabled={status === 'processing' || status === 'uploading'}
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </Button>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        )}
 
         {/* Progress */}
         {(status === 'uploading' || status === 'processing') && (
