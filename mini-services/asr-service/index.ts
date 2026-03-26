@@ -101,20 +101,12 @@ async function transcribeWithWhisper(
     const formData = new FormData()
     formData.append('file', new Blob([audioBuffer], { type: contentType }), fileName)
 
-    // Create AbortController with timeout
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => {
-      console.log(`[${jobId}] Timeout after ${WHISPER_TIMEOUT}ms, aborting...`)
-      controller.abort()
-    }, WHISPER_TIMEOUT)
-
+    // Use AbortSignal.timeout for proper timeout handling
     const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
       method: 'POST',
       body: formData,
-      signal: controller.signal
+      signal: AbortSignal.timeout(WHISPER_TIMEOUT)
     })
-
-    clearTimeout(timeoutId)
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
