@@ -8,7 +8,6 @@ import { Progress } from '@/components/ui/progress'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Mic,
   Upload,
@@ -25,7 +24,6 @@ import {
   WifiOff,
   AlertTriangle,
   Scissors,
-  ArrowRight,
   CheckCircle
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
@@ -68,7 +66,6 @@ export default function Home() {
   const [trimmedBlob, setTrimmedBlob] = useState<Blob | null>(null)
   const [trimmedFileName, setTrimmedFileName] = useState<string>('')
   const [transcriptionMode, setTranscriptionMode] = useState<'full' | 'selection'>('full')
-  const [activeTab, setActiveTab] = useState('upload')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const processingStartTime = useRef<number>(0)
   const { toast } = useToast()
@@ -305,7 +302,7 @@ export default function Home() {
 
     // If mode is selection and we have a trimmed blob, use that
     if (transcriptionMode === 'selection' && trimmedBlob) {
-      fileToTranscribe = new File([trimmedBlob], trimmedFileName || 'trimmed.wav', { type: 'audio/wav' })
+      fileToTranscribe = new File([trimmedBlob], trimmedFileName || 'trimmed.mp3', { type: 'audio/mp3' })
       fileSize = trimmedBlob.size
     }
 
@@ -389,7 +386,7 @@ export default function Home() {
       const url = URL.createObjectURL(trimmedBlob)
       const a = document.createElement('a')
       a.href = url
-      a.download = trimmedFileName || 'trimmed.wav'
+      a.download = trimmedFileName || 'trimmed.mp3'
       a.click()
       URL.revokeObjectURL(url)
     }
@@ -412,12 +409,15 @@ export default function Home() {
     setProcessingTime(0)
     setTrimmedBlob(null)
     setSelectedRegion(null)
-    setActiveTab('upload')
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   // Estimate processing time based on file size
   const estimatedTime = file ? Math.ceil(file.size / (1024 * 1024) * 0.5) : 0
+
+  // Calculate region duration
+  const regionDuration = selectedRegion ? selectedRegion.end - selectedRegion.start : 0
+  const isRegionValid = regionDuration > 0.5 // At least 0.5 seconds
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
@@ -457,231 +457,173 @@ export default function Home() {
           </Alert>
         )}
 
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-2 bg-slate-700/50">
-            <TabsTrigger value="upload" className="text-slate-300 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400 data-[state=inactive]:hover:text-white data-[state=inactive]:hover:bg-slate-600/50">
-              <Upload className="w-4 h-4 mr-2" />
-              Загрузка
-              {audioLoaded && <CheckCircle className="w-4 h-4 ml-2 text-emerald-400" />}
-            </TabsTrigger>
-            <TabsTrigger value="editor" disabled={!audioLoaded} className="text-slate-300 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400 data-[state=inactive]:hover:text-white data-[state=inactive]:hover:bg-slate-600/50 disabled:text-slate-500 disabled:opacity-60">
-              <Scissors className="w-4 h-4 mr-2" />
-              Редактор
-            </TabsTrigger>
-          </TabsList>
+        {/* Upload Area */}
+        <Card className="bg-slate-800/50 border-slate-700 mb-6">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-white flex items-center gap-2">
+              <Upload className="w-5 h-5 text-emerald-400" />
+              Аудиофайл
+            </CardTitle>
+            <CardDescription className="text-slate-400">
+              WAV, MP3, M4A, FLAC, OGG, WebM, MP4 (до 100MB)
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div
+              className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all
+            ${isDragging ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-600 hover:border-slate-500'}
+            ${audioLoaded ? 'border-emerald-500/50 bg-emerald-500/5' : ''}`}
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onClick={() => !audioLoading && fileInputRef.current?.click()}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="audio/*,video/webm,video/mp4,.wav,.mp3,.m4a,.flac,.ogg,.webm,.mp4"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
+              />
 
-          {/* Upload Tab */}
-          <TabsContent value="upload" className="space-y-6">
-            {/* Upload Area */}
-            <Card className="bg-slate-800/50 border-slate-700">
-              <CardHeader>
-                <CardTitle className="text-white flex items-center gap-2">
-                  <Upload className="w-5 h-5 text-emerald-400" />
-                  Загрузка файла
-                </CardTitle>
-                <CardDescription className="text-slate-400">
-                  WAV, MP3, M4A, FLAC, OGG, WebM, MP4 (до 100MB)
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div
-                  className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all
-                ${isDragging ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-600 hover:border-slate-500'}
-                ${audioLoaded ? 'border-emerald-500 bg-emerald-500/5' : ''}`}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onClick={() => !audioLoading && fileInputRef.current?.click()}
-                >
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="audio/*,video/webm,video/mp4,.wav,.mp3,.m4a,.flac,.ogg,.webm,.mp4"
-                    className="hidden"
-                    onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
-                  />
-
-                  {audioLoading ? (
-                    <div className="space-y-3">
-                      <Loader2 className="w-12 h-12 text-emerald-400 mx-auto animate-spin" />
-                      <p className="text-white font-medium">Загрузка аудио...</p>
-                      <Progress value={50} className="h-2 w-48 mx-auto animate-pulse" />
-                    </div>
-                  ) : audioLoaded && file ? (
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-center gap-3">
-                        <CheckCircle2 className="w-12 h-12 text-emerald-400" />
-                        <div className="text-left">
-                          <p className="text-white font-medium">{file.name}</p>
-                          <p className="text-slate-400 text-sm">{formatFileSize(file.size)} • {formatDuration(audioDuration)}</p>
-                        </div>
-                      </div>
-
-                      {/* Ready indicator */}
-                      <div className="flex items-center justify-center gap-2 text-emerald-400">
-                        <Badge className="bg-emerald-500/20 text-emerald-400 px-4 py-2">
-                          <CheckCircle className="w-4 h-4 mr-2" />
-                          Файл готов к работе
-                        </Badge>
-                      </div>
-
-                      {/* Go to editor button */}
-                      <Button
-                        variant="outline"
-                        className="border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/10"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setActiveTab('editor')
-                        }}
-                      >
-                        <Scissors className="w-4 h-4 mr-2" />
-                        Открыть редактор
-                        <ArrowRight className="w-4 h-4 ml-2" />
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      <Upload className="w-12 h-12 text-slate-400 mx-auto" />
-                      <p className="text-white font-medium">Перетащите файл сюда</p>
-                      <p className="text-slate-400 text-sm">или нажмите для выбора</p>
-                    </div>
-                  )}
+              {audioLoading ? (
+                <div className="space-y-3">
+                  <Loader2 className="w-10 h-10 text-emerald-400 mx-auto animate-spin" />
+                  <p className="text-white font-medium">Загрузка аудио...</p>
                 </div>
-              </CardContent>
-            </Card>
-
-            {/* Quick actions after upload */}
-            {audioLoaded && (
-              <div className="animate-in fade-in duration-300">
-                <Card className="bg-slate-800/50 border-slate-700">
-                  <CardHeader>
-                    <CardTitle className="text-white flex items-center gap-2">
-                      <Mic className="w-5 h-5 text-emerald-400" />
-                      Распознавание речи
-                    </CardTitle>
-                    <CardDescription className="text-slate-400">
-                      Выберите режим распознавания
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <Button
-                        variant={transcriptionMode === 'full' ? 'default' : 'outline'}
-                        onClick={() => setTranscriptionMode('full')}
-                        className={`h-auto py-4 ${transcriptionMode === 'full' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600'}`}
-                      >
-                        <div className="text-left">
-                          <div className="font-medium">Весь файл</div>
-                          <div className="text-xs opacity-70">
-                            {file && `${formatFileSize(file.size)} • ${formatDuration(audioDuration)}`}
-                          </div>
-                        </div>
-                      </Button>
-                      <Button
-                        variant={transcriptionMode === 'selection' ? 'default' : 'outline'}
-                        onClick={() => setTranscriptionMode('selection')}
-                        disabled={!selectedRegion && !trimmedBlob}
-                        className={`h-auto py-4 ${transcriptionMode === 'selection' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600'}`}
-                      >
-                        <div className="text-left">
-                          <div className="font-medium">Выбранный участок</div>
-                          <div className="text-xs opacity-70">
-                            {selectedRegion
-                              ? `${formatTimeShort(selectedRegion.start)} - ${formatTimeShort(selectedRegion.end)}`
-                              : trimmedBlob
-                                ? formatFileSize(trimmedBlob.size)
-                                : 'Выберите в редакторе'}
-                          </div>
-                        </div>
-                      </Button>
+              ) : audioLoaded && file ? (
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+                    <div className="text-left">
+                      <p className="text-white font-medium">{file.name}</p>
+                      <p className="text-slate-400 text-sm">{formatFileSize(file.size)} • {formatDuration(audioDuration)}</p>
                     </div>
-
-                    <div className="flex gap-3 mt-4">
-                      <Button
-                        onClick={handleTranscribe}
-                        disabled={!file || status === 'processing' || status === 'uploading' || !isConnected}
-                        className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
-                      >
-                        {status === 'uploading' || status === 'processing' ? (
-                          <>
-                            <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                            Обработка...
-                          </>
-                        ) : (
-                          <>
-                            <Mic className="w-5 h-5 mr-2" />
-                            Распознать {transcriptionMode === 'selection' ? 'участок' : 'всё'}
-                          </>
-                        )}
-                      </Button>
-
-                      {file && (
-                        <Button
-                          onClick={handleReset}
-                          variant="outline"
-                          className="border-slate-600 text-slate-300"
-                          disabled={status === 'processing' || status === 'uploading'}
-                        >
-                          <Trash2 className="w-5 h-5" />
-                        </Button>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-            )}
-          </TabsContent>
-
-          {/* Editor Tab */}
-          <TabsContent value="editor" className="space-y-6">
-            <Card className="bg-slate-800/50 border-slate-700">
-              <CardHeader>
-                <CardTitle className="text-white flex items-center gap-2">
-                  <FileAudio className="w-5 h-5 text-emerald-400" />
-                  Аудио редактор
-                </CardTitle>
-                <CardDescription className="text-slate-400">
-                  Прослушайте аудио, выберите участок для транскрипции
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <WaveformEditor
-                  audioFile={file}
-                  audioUrl={audioUrl}
-                  onRegionChange={handleRegionChange}
-                  onTrimmedAudio={handleTrimmedAudio}
-                  onLoadingChange={(loading) => setAudioLoading(loading)}
-                  onLoadedChange={(loaded) => setAudioLoaded(loaded)}
-                />
-              </CardContent>
-            </Card>
-
-            {/* Trimmed audio info */}
-            {trimmedBlob && (
-              <Alert className="bg-emerald-500/10 border-emerald-500/50">
-                <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                <AlertDescription className="text-emerald-300">
-                  Вырезанный фрагмент: {formatFileSize(trimmedBlob.size)} ({trimmedFileName})
-                  <Button variant="link" size="sm" onClick={handleDownloadTrimmed} className="text-emerald-400 ml-2 p-0">
-                    <Download className="w-4 h-4 mr-1" /> Скачать
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      handleReset()
+                    }}
+                    className="border-slate-600 text-slate-300 hover:bg-slate-700"
+                  >
+                    <Trash2 className="w-4 h-4 mr-1" />
+                    Другой файл
                   </Button>
-                </AlertDescription>
-              </Alert>
-            )}
-
-            {/* Back to upload */}
-            <div className="flex justify-center">
-              <Button
-                variant="outline"
-                className="border-slate-600 text-slate-300"
-                onClick={() => setActiveTab('upload')}
-              >
-                <ArrowRight className="w-4 h-4 mr-2 rotate-180" />
-                Вернуться к распознаванию
-              </Button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <Upload className="w-10 h-10 text-slate-400 mx-auto" />
+                  <p className="text-white font-medium">Перетащите файл сюда</p>
+                  <p className="text-slate-400 text-sm">или нажмите для выбора</p>
+                </div>
+              )}
             </div>
-          </TabsContent>
-        </Tabs>
+          </CardContent>
+        </Card>
+
+        {/* Waveform Editor - shows when file is loaded */}
+        {audioUrl && (
+          <Card className="bg-slate-800/50 border-slate-700 mb-6">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-white flex items-center gap-2">
+                <Scissors className="w-5 h-5 text-emerald-400" />
+                Редактор
+              </CardTitle>
+              <CardDescription className="text-slate-400">
+                Прослушайте аудио и выберите участок для распознавания
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <WaveformEditor
+                audioFile={file}
+                audioUrl={audioUrl}
+                onRegionChange={handleRegionChange}
+                onTrimmedAudio={handleTrimmedAudio}
+                onLoadingChange={setAudioLoading}
+                onLoadedChange={setAudioLoaded}
+              />
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Trimmed audio info */}
+        {trimmedBlob && (
+          <Alert className="bg-emerald-500/10 border-emerald-500/50 mb-6">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+            <AlertDescription className="text-emerald-300 flex items-center justify-between">
+              <span>Вырезанный фрагмент: {formatFileSize(trimmedBlob.size)} ({trimmedFileName})</span>
+              <Button variant="link" size="sm" onClick={handleDownloadTrimmed} className="text-emerald-400">
+                <Download className="w-4 h-4 mr-1" /> Скачать
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Transcription Controls - shows when file is loaded and idle */}
+        {audioLoaded && status === 'idle' && (
+          <Card className="bg-slate-800/50 border-slate-700 mb-6">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-white flex items-center gap-2">
+                <Mic className="w-5 h-5 text-emerald-400" />
+                Распознавание
+              </CardTitle>
+              <CardDescription className="text-slate-400">
+                Выберите что распознать: весь файл или только выбранный участок
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Button
+                  variant={transcriptionMode === 'full' ? 'default' : 'outline'}
+                  onClick={() => setTranscriptionMode('full')}
+                  className={`h-auto py-4 justify-start ${transcriptionMode === 'full' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600 hover:bg-slate-700'}`}
+                >
+                  <div className="flex items-center gap-3">
+                    <FileAudio className="w-6 h-6" />
+                    <div className="text-left">
+                      <div className="font-medium">Весь файл</div>
+                      <div className="text-xs opacity-70">
+                        {formatFileSize(file?.size || 0)} • {formatDuration(audioDuration)}
+                      </div>
+                    </div>
+                  </div>
+                </Button>
+                <Button
+                  variant={transcriptionMode === 'selection' ? 'default' : 'outline'}
+                  onClick={() => setTranscriptionMode('selection')}
+                  disabled={!isRegionValid && !trimmedBlob}
+                  className={`h-auto py-4 justify-start ${transcriptionMode === 'selection' ? 'bg-emerald-500 hover:bg-emerald-600' : 'border-slate-600 hover:bg-slate-700'}`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Scissors className="w-6 h-6" />
+                    <div className="text-left">
+                      <div className="font-medium">Выбранный участок</div>
+                      <div className="text-xs opacity-70">
+                        {selectedRegion && isRegionValid
+                          ? `${formatTimeShort(selectedRegion.start)} - ${formatTimeShort(selectedRegion.end)} (${formatDuration(regionDuration)})`
+                          : trimmedBlob
+                            ? `${formatFileSize(trimmedBlob.size)} (вырезан)`
+                            : 'Выберите участок на波形'}
+                      </div>
+                    </div>
+                  </div>
+                </Button>
+              </div>
+
+              <Button
+                onClick={handleTranscribe}
+                disabled={!isConnected || (transcriptionMode === 'selection' && !trimmedBlob && !isRegionValid)}
+                className="w-full bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 py-6 text-lg"
+              >
+                <Mic className="w-5 h-5 mr-2" />
+                Распознать {transcriptionMode === 'selection' ? 'выбранный участок' : 'весь файл'}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Progress */}
         {(status === 'uploading' || status === 'processing') && (
