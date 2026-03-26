@@ -27,6 +27,7 @@ import {
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 import WaveformEditor from '@/components/audio/WaveformEditor'
+import { initMp3Encoder, encodeBufferToMp3 } from '@/lib/mp3-encoder'
 
 const CHUNK_SIZE = 1024 * 1024 // 1MB chunks
 
@@ -62,7 +63,13 @@ export default function Home() {
   const [selectedRegion, setSelectedRegion] = useState<{start: number, end: number} | null>(null)
   const [isEncoding, setIsEncoding] = useState(false)
   const [isLoadingAudio, setIsLoadingAudio] = useState(false)
+  const [mp3Ready, setMp3Ready] = useState(false)
   const audioContextRef = useRef<AudioContext | null>(null)
+
+  // Initialize MP3 encoder on mount
+  useEffect(() => {
+    initMp3Encoder().then(setMp3Ready)
+  }, [])
 
   // Timer for processing
   useEffect(() => {
@@ -275,7 +282,7 @@ export default function Home() {
     if (useSelection && selectedRegion && audioBuffer) {
       setIsEncoding(true)
       try {
-        const encodedBlob = await encodeSelectedRegionToMp3()
+        const encodedBlob = encodeSelectedRegionToMp3()
         if (encodedBlob) {
           fileToTranscribe = encodedBlob
         } else {
@@ -376,7 +383,7 @@ export default function Home() {
   }
 
   // Encode selected region to MP3 using lamejs
-  const encodeSelectedRegionToMp3 = async (): Promise<Blob | null> => {
+  const encodeSelectedRegionToMp3 = (): Blob | null => {
     if (!audioBuffer || !selectedRegion) return null
 
     const regionBuffer = extractSelectedRegion(audioBuffer)
@@ -384,74 +391,20 @@ export default function Home() {
   }
 
   // Encode AudioBuffer to MP3 using lamejs
-  const encodeToMp3 = async (buffer: AudioBuffer): Promise<Blob> => {
-    // Dynamic import of lamejs
-    const lamejs = (await import('lamejs')).default
-    
-    const numChannels = buffer.numberOfChannels
-    const sampleRate = buffer.sampleRate
-    const kbps = 128
-
-    // Get channel data
-    const left = buffer.getChannelData(0)
-    const right = numChannels > 1 ? buffer.getChannelData(1) : left
-
-    // Convert to Int16
-    const leftInt = new Int16Array(left.length)
-    const rightInt = new Int16Array(right.length)
-    
-    for (let i = 0; i < left.length; i++) {
-      leftInt[i] = Math.max(-32768, Math.min(32767, Math.floor(left[i] * 32767)))
-      rightInt[i] = Math.max(-32768, Math.min(32767, Math.floor(right[i] * 32767)))
+  const encodeToMp3 = (buffer: AudioBuffer): Blob => {
+    if (!mp3Ready) {
+      throw new Error('MP3 encoder not loaded. Please wait and try again.')
     }
-
-    // Create MP3 encoder
-    const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, kbps)
-    const mp3Data: Int8Array[] = []
-
-    // Encode in chunks of 1152 samples
-    const blockSize = 1152
-    for (let i = 0; i < leftInt.length; i += blockSize) {
-      const leftChunk = leftInt.subarray(i, i + blockSize)
-      const rightChunk = rightInt.subarray(i, i + blockSize)
-      
-      let mp3buf: Int8Array
-      if (numChannels > 1) {
-        mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk)
-      } else {
-        mp3buf = mp3encoder.encodeBuffer(leftChunk)
-      }
-      
-      if (mp3buf.length > 0) {
-        mp3Data.push(mp3buf)
-      }
-    }
-
-    // Flush remaining
-    const remaining = mp3encoder.flush()
-    if (remaining.length > 0) {
-      mp3Data.push(remaining)
-    }
-
-    // Combine all MP3 data
-    const totalLength = mp3Data.reduce((acc, arr) => acc + arr.length, 0)
-    const mp3Combined = new Uint8Array(totalLength)
-    let offset = 0
-    for (const chunk of mp3Data) {
-      mp3Combined.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.length), offset)
-      offset += chunk.length
-    }
-
-    return new Blob([mp3Combined], { type: 'audio/mp3' })
+    return encodeBufferToMp3(buffer)
   }
 
   // Download selected region as MP3
-  const handleDownloadSelection = async () => {
+  const handleDownloadSelection = () => {
     if (!selectedRegion || !audioBuffer) return
     
     setIsEncoding(true)
     try {
-      const blob = await encodeSelectedRegionToMp3()
+      const blob = encodeSelectedRegionToMp3()
       if (blob) {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
