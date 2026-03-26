@@ -1,37 +1,56 @@
-// MP3 encoder utility using lamejs
-// lamejs needs MPEGMode to be global, so we handle that here
+// MP3 encoder utility using lamejs loaded from CDN
+// This avoids the MPEGMode global variable issues with the npm package
 
-let lamejsLoaded = false
-let lamejs: any = null
-
-export async function initMp3Encoder(): Promise<boolean> {
-  if (lamejsLoaded && lamejs) return true
-  
-  try {
-    const module = await import('lamejs')
-    lamejs = module.default || module
-    
-    // Set MPEGMode globally - lamejs needs this internally
-    if (typeof window !== 'undefined' && lamejs.MPEGMode) {
-      // @ts-ignore
-      window.MPEGMode = lamejs.MPEGMode
-    }
-    
-    lamejsLoaded = true
-    return true
-  } catch (err) {
-    console.error('Failed to load lamejs:', err)
-    return false
+declare global {
+  interface Window {
+    lamejs: any
   }
 }
 
+let lamejsLoaded = false
+let loadingPromise: Promise<boolean> | null = null
+
+export async function initMp3Encoder(): Promise<boolean> {
+  if (lamejsLoaded && window.lamejs) return true
+  if (loadingPromise) return loadingPromise
+  
+  loadingPromise = new Promise((resolve) => {
+    // Check if already loaded
+    if (window.lamejs) {
+      lamejsLoaded = true
+      resolve(true)
+      return
+    }
+    
+    // Load from CDN
+    const script = document.createElement('script')
+    script.src = 'https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js'
+    script.async = true
+    
+    script.onload = () => {
+      lamejsLoaded = true
+      resolve(true)
+    }
+    
+    script.onerror = () => {
+      console.error('Failed to load lamejs from CDN')
+      resolve(false)
+    }
+    
+    document.head.appendChild(script)
+  })
+  
+  return loadingPromise
+}
+
 export function getLamejs(): any {
-  return lamejs
+  return window.lamejs
 }
 
 export function encodeBufferToMp3(buffer: AudioBuffer): Blob {
+  const lamejs = window.lamejs
   if (!lamejs) {
-    throw new Error('MP3 encoder not initialized. Call initMp3Encoder() first.')
+    throw new Error('MP3 encoder not initialized. Please wait and try again.')
   }
   
   const numChannels = buffer.numberOfChannels
