@@ -281,12 +281,12 @@ export default function Home() {
   const handleTrimmedAudio = useCallback((blob: Blob, start: number, end: number) => {
     setTrimmedBlob(blob)
     const baseName = file?.name.replace(/\.[^/.]+$/, '') || 'audio'
-    setTrimmedFileName(`${baseName}_${formatTimeShort(start)}-${formatTimeShort(end)}.wav`)
+    setTrimmedFileName(`${baseName}_${formatTimeShort(start)}-${formatTimeShort(end)}.mp3`)
 
     // Create URL for trimmed audio
     const url = URL.createObjectURL(blob)
     setAudioUrl(url)
-    setFile(new File([blob], `${baseName}_trimmed.wav`, { type: 'audio/wav' }))
+    setFile(new File([blob], `${baseName}_trimmed.mp3`, { type: 'audio/mp3' }))
 
     // Reset region for new file
     setSelectedRegion(null)
