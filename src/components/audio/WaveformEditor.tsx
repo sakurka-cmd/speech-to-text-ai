@@ -529,10 +529,10 @@ export default function WaveformEditor({
 
         {region && (
           <div className="absolute top-2 left-2 flex gap-2">
-            <Badge variant="secondary" className="bg-slate-900/80">
+            <Badge variant="secondary" className="bg-white/90 text-slate-800 font-medium shadow-sm">
               {formatTimeFull(region.start)} - {formatTimeFull(region.end)}
             </Badge>
-            <Badge variant="secondary" className="bg-slate-900/80">
+            <Badge variant="secondary" className="bg-emerald-500/90 text-white font-medium shadow-sm">
               {formatTimeFull(region.end - region.start)} выбрано
             </Badge>
           </div>
@@ -548,7 +548,7 @@ export default function WaveformEditor({
           onValueChange={([v]) => seekTo(v)}
           className="cursor-pointer"
         />
-        <div className="flex justify-between text-xs text-slate-500 mt-1">
+        <div className="flex justify-between text-xs text-slate-300 mt-1">
           <span>{formatTimeFull(currentTime)}</span>
           <span>{formatTimeFull(duration)}</span>
         </div>
@@ -614,7 +614,7 @@ export default function WaveformEditor({
         </div>
       </div>
 
-      <p className="text-center text-xs text-slate-500">
+      <p className="text-center text-xs text-slate-400">
         Перетащите края выделенной области для выбора участка • MP3 128kbps
       </p>
     </div>
